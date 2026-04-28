@@ -1,0 +1,816 @@
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { extname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const rootDir = resolve(__dirname, "..");
+
+loadEnvFile(join(rootDir, ".env"));
+
+const dataDir = process.env.DATA_DIR ? resolve(rootDir, process.env.DATA_DIR) : join(rootDir, "data");
+const distDir = join(rootDir, "dist");
+const port = Number(process.env.PORT || 8787);
+const autoRefresh = parseBool(process.env.AUTO_REFRESH, true);
+const initialRefresh = parseBool(process.env.INITIAL_REFRESH, true);
+
+if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
+
+const statePath = join(dataDir, "state.json");
+const settingsPath = join(dataDir, "settings.json");
+const assetsPath = join(dataDir, "assets.json");
+const pushPath = join(dataDir, "push-log.json");
+
+const defaultSettings = {
+  refreshIntervalMinutes: Number(process.env.REFRESH_INTERVAL_MINUTES || 10),
+  heatThreshold: Number(process.env.HEAT_THRESHOLD || 72),
+  riskThreshold: "中",
+  sources: {
+    hackerNews: true,
+    arxiv: true,
+    googleNews: true,
+    github: true,
+    reddit: true,
+    coingecko: true,
+  },
+  keywords: csv(process.env.TRACK_KEYWORDS, ["AI", "OpenAI", "Bitcoin", "crypto", "芯片", "电动车", "地缘政治", "robot", "agent"]),
+  blockedWords: csv(process.env.BLOCKED_WORDS, ["广告", "招聘", "水贴", "博彩", "返利"]),
+  telegram: {
+    enabled: parseBool(process.env.TELEGRAM_ENABLED, false),
+    botToken: process.env.TELEGRAM_BOT_TOKEN || "",
+    chatId: process.env.TELEGRAM_CHAT_ID || "",
+  },
+};
+
+const defaultAssets = [
+  {
+    id: "persona-crypto",
+    type: "账号人设",
+    name: "CryptoHunter",
+    description: "加密市场快讯、链上观察、风险提示，适合交易向内容。",
+    tags: ["Crypto", "交易", "风险"],
+  },
+  {
+    id: "template-ai-thread",
+    type: "内容模板",
+    name: "AI 事件 Thread",
+    description: "三段式拆解：发生了什么、为什么重要、下一步看什么。",
+    tags: ["AI", "Thread", "分析"],
+  },
+  {
+    id: "template-risk",
+    type: "风控话术",
+    name: "敏感事件安全表达",
+    description: "降低煽动性，强调事实核验、来源和不确定性。",
+    tags: ["风险", "地缘政治", "合规"],
+  },
+];
+
+let memory = loadJson(statePath, {
+  topics: [],
+  jobs: [],
+  stats: emptyStats(),
+  lastRefreshAt: null,
+});
+let settings = loadJson(settingsPath, defaultSettings);
+settings = {
+  ...defaultSettings,
+  ...settings,
+  sources: { ...defaultSettings.sources, ...(settings.sources || {}) },
+  telegram: { ...defaultSettings.telegram, ...(settings.telegram || {}) },
+};
+let assets = loadJson(assetsPath, defaultAssets);
+let pushLog = loadJson(pushPath, []);
+let refreshInFlight = false;
+let refreshTimer = null;
+
+function loadEnvFile(path) {
+  if (!existsSync(path)) return;
+  const lines = readFileSync(path, "utf8").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const index = trimmed.indexOf("=");
+    if (index < 0) continue;
+    const key = trimmed.slice(0, index).trim();
+    let value = trimmed.slice(index + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (!(key in process.env)) process.env[key] = value;
+  }
+}
+
+function parseBool(value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
+}
+
+function csv(value, fallback) {
+  if (!value) return fallback;
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function loadJson(path, fallback) {
+  if (!existsSync(path)) {
+    writeFileSync(path, JSON.stringify(fallback, null, 2));
+    return structuredClone(fallback);
+  }
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return structuredClone(fallback);
+  }
+}
+
+function persist() {
+  writeFileSync(statePath, JSON.stringify(memory, null, 2));
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+  writeFileSync(assetsPath, JSON.stringify(assets, null, 2));
+  writeFileSync(pushPath, JSON.stringify(pushLog.slice(0, 200), null, 2));
+}
+
+function scheduleAutoRefresh() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  if (!autoRefresh) return;
+  const intervalMs = Math.max(1, Number(settings.refreshIntervalMinutes || 10)) * 60 * 1000;
+  refreshTimer = setInterval(() => {
+    runRefresh({ manual: false }).catch((error) => console.error("scheduled refresh failed", error));
+  }, intervalMs);
+  refreshTimer.unref?.();
+}
+
+function emptyStats() {
+  return {
+    discovered: 0,
+    hot: 0,
+    generated: 0,
+    pushed: 0,
+    failedSources: 0,
+    activeSources: 0,
+  };
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function idFor(input) {
+  return createHash("sha1").update(input).digest("hex").slice(0, 12);
+}
+
+function stripHtml(value = "") {
+  return String(value)
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function minutesAgo(dateValue) {
+  const time = new Date(dateValue).getTime();
+  if (!Number.isFinite(time)) return 240;
+  return Math.max(0, Math.round((Date.now() - time) / 60000));
+}
+
+function categoryFor(text) {
+  const lower = text.toLowerCase();
+  if (/bitcoin|btc|crypto|ethereum|solana|token|coin|defi|链|比特币|加密/.test(lower)) return "Crypto";
+  if (/ai|openai|model|agent|robot|llm|sora|芯片|英伟达|大模型|人工智能|机器人/.test(lower)) return "AI";
+  if (/war|israel|iran|russia|ukraine|tariff|election|protest|中东|以色列|伊朗|政治|选举|示威|关税/.test(lower)) return "地缘政治";
+  if (/meme|funny|viral|joke|梗|整活|笑/.test(lower)) return "整活/Meme";
+  if (/health|life|food|travel|生活|健康|旅游|教育/.test(lower)) return "生活百科";
+  return "猎奇";
+}
+
+function regionFor(text) {
+  const lower = text.toLowerCase();
+  if (/china|beijing|shanghai|中国|北京|上海|深圳|香港|台湾/.test(lower)) return "中国";
+  if (/japan|tokyo|日本|东京/.test(lower)) return "日本";
+  if (/korea|seoul|韩国|首尔/.test(lower)) return "韩国";
+  if (/us |usa|america|washington|美国|美联储|纽约/.test(lower)) return "美国";
+  return "全球";
+}
+
+function riskFor(text, category) {
+  const lower = text.toLowerCase();
+  const high = /war|attack|strike|death|explosion|protest|election|israel|iran|russia|ukraine|空袭|爆炸|死亡|抗议|示威|选举|战争|制裁|暴力|政治/.test(lower);
+  const medium = /hack|lawsuit|ban|crash|fraud|监管|封禁|诉讼|造假|崩盘|诈骗|争议/.test(lower);
+  if (high || category === "地缘政治") return "高";
+  if (medium || category === "Crypto") return "中";
+  return "低";
+}
+
+function sentimentFor(text, risk) {
+  const lower = text.toLowerCase();
+  if (risk === "高") return "警惕";
+  if (/breakthrough|surge|record|launch|growth|突破|发布|上涨|创新|增长|开放/.test(lower)) return "积极";
+  if (/fall|drop|ban|risk|concern|下跌|风险|争议|担忧/.test(lower)) return "警惕";
+  return "中性";
+}
+
+function extractKeywords(text) {
+  const stop = new Set([
+    "the",
+    "and",
+    "for",
+    "with",
+    "from",
+    "that",
+    "this",
+    "are",
+    "was",
+    "what",
+    "when",
+    "over",
+    "about",
+    "into",
+    "after",
+    "before",
+    "your",
+    "you",
+    "how",
+    "why",
+    "not",
+    "can",
+  ]);
+  const english = text.match(/[A-Za-z][A-Za-z0-9+#.-]{2,}/g) || [];
+  const chinese = text.match(/[\u4e00-\u9fa5]{2,6}/g) || [];
+  const tokens = [...english, ...chinese]
+    .map((word) => word.trim())
+    .filter((word) => !stop.has(word.toLowerCase()) && !settings.blockedWords.some((blocked) => word.includes(blocked)));
+  const counts = new Map();
+  for (const token of tokens) counts.set(token, (counts.get(token) || 0) + 1);
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 7)
+    .map(([word]) => word);
+}
+
+function heatScore(raw) {
+  const recency = Math.max(0, 42 - Math.sqrt(minutesAgo(raw.publishedAt || Date.now())) * 2.6);
+  const engagement = Math.log10((raw.score || 0) + (raw.comments || 0) * 2 + 10) * 19;
+  const sourceWeight =
+    raw.platform === "GitHub" ? 16 : raw.platform === "CoinGecko" ? 18 : raw.platform === "Hacker News" ? 18 : raw.platform === "arXiv" ? 15 : 10;
+  return Math.max(30, Math.min(99.8, recency + engagement + sourceWeight));
+}
+
+function trendFor(score, seed) {
+  const base = Math.max(8, Math.round(score * 0.45));
+  return Array.from({ length: 11 }, (_, index) => {
+    const wave = Math.sin((index + seed.length) * 0.9) * 5;
+    const lift = index * (score - base) / 10;
+    return Math.max(3, Math.min(100, Math.round(base + lift + wave)));
+  });
+}
+
+function normalizeTopic(raw) {
+  const title = stripHtml(raw.title || raw.name || "Untitled");
+  const desc = stripHtml(raw.desc || raw.description || raw.url || "");
+  const text = `${title} ${desc}`;
+  const category = categoryFor(text);
+  const risk = riskFor(text, category);
+  const heat = heatScore(raw);
+  const topic = {
+    id: idFor(`${raw.platform}:${title}:${raw.url || raw.publishedAt || ""}`),
+    title,
+    desc: desc || "公开数据源抓取到的新近内容，等待进一步人工复核。",
+    platform: raw.platform,
+    source: raw.source || raw.platform,
+    category,
+    region: regionFor(text),
+    heat: Number(heat.toFixed(1)),
+    boost: Math.round(Math.max(12, heat * 2.6 - minutesAgo(raw.publishedAt) * 0.2)),
+    sentiment: sentimentFor(text, risk),
+    risk,
+    url: raw.url || "",
+    author: raw.author || raw.source || raw.platform,
+    publishedAt: raw.publishedAt || nowIso(),
+    crawledAt: nowIso(),
+    score: raw.score || 0,
+    commentsCount: raw.comments || 0,
+    trend: trendFor(heat, title),
+    keywords: extractKeywords(text),
+  };
+  topic.summary = makeSummary(topic);
+  topic.comments = makeComments(topic);
+  topic.publishCopy = makeCopies(topic);
+  return topic;
+}
+
+function makeSummary(topic) {
+  const why = topic.category === "AI"
+    ? "技术迭代和应用落地预期会放大传播速度"
+    : topic.category === "Crypto"
+      ? "价格、资金流和情绪共振会带来短线扩散"
+      : topic.category === "地缘政治"
+        ? "事件可能牵动能源、政策与市场风险偏好"
+        : "话题具备强共鸣或猎奇传播属性";
+  return `${topic.title} 正在 ${topic.platform} 等公开源升温，当前热度 ${topic.heat}。${why}，建议结合原始链接和二次来源继续核验。`;
+}
+
+function makeComments(topic) {
+  return [
+    {
+      author: "系统观点",
+      handle: "@signal",
+      avatar: "S",
+      text: `核心看点：${topic.keywords.slice(0, 3).join(" / ") || topic.category}。`,
+      replies: String(Math.max(8, Math.round(topic.commentsCount * 0.18))),
+      shares: String(Math.max(12, Math.round(topic.score * 0.12))),
+      likes: String(Math.max(60, Math.round(topic.heat * 42))),
+    },
+    {
+      author: "风险雷达",
+      handle: "@risk",
+      avatar: "R",
+      text: topic.risk === "高" ? "先核验事实和来源，再决定是否跟进。" : "适合做快讯或观点延展，但仍需检查标题党风险。",
+      replies: String(Math.max(3, Math.round(topic.heat / 8))),
+      shares: String(Math.max(5, Math.round(topic.heat / 5))),
+      likes: String(Math.max(40, Math.round(topic.heat * 18))),
+    },
+  ];
+}
+
+function makeCopies(topic) {
+  const tags = topic.keywords.slice(0, 4).map((word) => `#${word.replace(/\s+/g, "")}`).join(" ");
+  return {
+    快讯版: `刚刚关注到：${topic.title}。当前热度 ${topic.heat}，主要关键词是 ${topic.keywords.slice(0, 3).join("、") || topic.category}。${tags}`,
+    锐评版: `${topic.title} 的关键不只是事件本身，而是它可能改变 ${topic.category} 领域的预期。先看传播速度，再看是否有权威来源确认。`,
+    Thread版: `1/ ${topic.title}\n2/ 当前热度 ${topic.heat}，来源：${topic.source}。\n3/ 重点看 ${topic.keywords.slice(0, 3).join("、") || topic.category}。\n4/ 风险等级：${topic.risk}，发布前建议二次核验。`,
+    Meme版: `${topic.title}\n网友：今天就安静刷会儿。\n热搜：不，你不能。`,
+    带节奏版: `${topic.title} 已经开始扩散。现在的问题不是要不要关注，而是谁能更快把事实、影响和机会讲清楚。`,
+  };
+}
+
+async function fetchJson(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 9000);
+  try {
+    const res = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        "user-agent": "ai-hottopics/0.1 (+local research dashboard)",
+        accept: "application/json,text/plain,*/*",
+        ...(options.headers || {}),
+      },
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchText(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 9000);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "user-agent": "ai-hottopics/0.1 (+local research dashboard)",
+        accept: "application/rss+xml,text/xml,text/plain,*/*",
+      },
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function crawlHackerNews() {
+  const sevenDaysAgo = Math.floor((Date.now() - 7 * 24 * 60 * 60 * 1000) / 1000);
+  const urls = [
+    "https://hn.algolia.com/api/v1/search_by_date?tags=story&hitsPerPage=35",
+    ...settings.keywords
+      .slice(0, 4)
+      .map(
+        (keyword) =>
+          `https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(keyword)}&tags=story&numericFilters=created_at_i>${sevenDaysAgo}&hitsPerPage=12`,
+      ),
+  ];
+  const hits = [];
+  for (const url of urls) {
+    const data = await fetchJson(url);
+    hits.push(...(data.hits || []));
+  }
+  return hits.map((item) => ({
+    platform: "Hacker News",
+    source: "HN",
+    title: item.title || item.story_title,
+    desc: item.url || item.story_text || "",
+    url: item.url || `https://news.ycombinator.com/item?id=${item.objectID}`,
+    author: item.author,
+    publishedAt: item.created_at,
+    score: item.points || 0,
+    comments: item.num_comments || 0,
+  }));
+}
+
+function parseAtom(xml, source) {
+  const entries = [];
+  const entryMatches = xml.match(/<entry>[\s\S]*?<\/entry>/g) || [];
+  for (const entry of entryMatches.slice(0, 18)) {
+    const pick = (tag) => stripHtml((entry.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`)) || [])[1] || "");
+    const link = (entry.match(/<link[^>]+href="([^"]+)"/) || [])[1] || "";
+    entries.push({
+      platform: "arXiv",
+      source,
+      title: pick("title"),
+      desc: pick("summary"),
+      url: link,
+      author: source,
+      publishedAt: pick("published") || pick("updated") || nowIso(),
+      score: 130,
+      comments: 10,
+    });
+  }
+  return entries;
+}
+
+async function crawlArxiv() {
+  const all = [];
+  const queries = ["artificial intelligence", "large language model", "agent", "robotics"];
+  for (const query of queries) {
+    const url = `https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&start=0&max_results=8&sortBy=submittedDate&sortOrder=descending`;
+    const xml = await fetchText(url);
+    all.push(...parseAtom(xml, `arXiv: ${query}`));
+  }
+  return all;
+}
+
+async function crawlGithub() {
+  const data = await fetchJson("https://api.github.com/search/repositories?q=AI+OR+agent+OR+LLM+created:%3E2026-01-01&sort=updated&order=desc&per_page=20");
+  return (data.items || []).map((repo) => ({
+    platform: "GitHub",
+    source: "GitHub Search",
+    title: repo.full_name,
+    desc: repo.description || "Recently active repository",
+    url: repo.html_url,
+    author: repo.owner?.login,
+    publishedAt: repo.updated_at,
+    score: repo.stargazers_count || 0,
+    comments: repo.open_issues_count || 0,
+  }));
+}
+
+async function crawlCoinGecko() {
+  const data = await fetchJson("https://api.coingecko.com/api/v3/search/trending");
+  return (data.coins || []).map(({ item }) => ({
+    platform: "CoinGecko",
+    source: "CoinGecko Trending",
+    title: `${item.name} (${item.symbol}) 热度上升`,
+    desc: `Market cap rank ${item.market_cap_rank || "-"}, price BTC ${item.price_btc || "-"}`,
+    url: `https://www.coingecko.com/en/coins/${item.id}`,
+    author: item.symbol,
+    publishedAt: nowIso(),
+    score: item.score ? 1000 - item.score * 100 : 200,
+    comments: item.market_cap_rank ? Math.max(1, 500 - item.market_cap_rank) : 50,
+  }));
+}
+
+async function crawlReddit() {
+  const subs = ["artificial", "technology", "CryptoCurrency", "worldnews"];
+  const results = [];
+  for (const sub of subs) {
+    const data = await fetchJson(`https://www.reddit.com/r/${sub}/hot.json?limit=12`, {
+      headers: { accept: "application/json" },
+    });
+    for (const child of data.data?.children || []) {
+      const post = child.data;
+      results.push({
+        platform: "Reddit",
+        source: `r/${sub}`,
+        title: post.title,
+        desc: post.selftext || post.url || "",
+        url: `https://www.reddit.com${post.permalink}`,
+        author: post.author,
+        publishedAt: new Date(post.created_utc * 1000).toISOString(),
+        score: post.score || 0,
+        comments: post.num_comments || 0,
+      });
+    }
+  }
+  return results;
+}
+
+function parseRss(xml, source) {
+  const items = [];
+  const itemMatches = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
+  for (const item of itemMatches.slice(0, 25)) {
+    const pick = (tag) => stripHtml((item.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`)) || [])[1] || "");
+    items.push({
+      platform: "Google News",
+      source,
+      title: pick("title"),
+      desc: pick("description"),
+      url: pick("link"),
+      author: source,
+      publishedAt: pick("pubDate") || nowIso(),
+      score: 80,
+      comments: 12,
+    });
+  }
+  return items;
+}
+
+async function crawlGoogleNews() {
+  const queries = settings.keywords.slice(0, 7);
+  const all = [];
+  for (const query of queries) {
+    const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans`;
+    const xml = await fetchText(url);
+    all.push(...parseRss(xml, `Google News: ${query}`));
+  }
+  return all;
+}
+
+async function runRefresh({ manual = false } = {}) {
+  if (refreshInFlight) return memory;
+  refreshInFlight = true;
+  const job = {
+    id: idFor(`${Date.now()}:refresh`),
+    type: manual ? "手动抓取" : "自动抓取",
+    status: "running",
+    startedAt: nowIso(),
+    finishedAt: null,
+    sources: [],
+    message: "抓取中",
+  };
+  memory.jobs.unshift(job);
+  memory.jobs = memory.jobs.slice(0, 80);
+
+  const sourceTasks = [
+    ["hackerNews", "Hacker News", crawlHackerNews],
+    ["arxiv", "arXiv", crawlArxiv],
+    ["googleNews", "Google News RSS", crawlGoogleNews],
+    ["github", "GitHub Search", crawlGithub],
+    ["reddit", "Reddit", crawlReddit],
+    ["coingecko", "CoinGecko", crawlCoinGecko],
+  ].filter(([key]) => settings.sources[key]);
+
+  const raw = [];
+  for (const [, name, fn] of sourceTasks) {
+    const started = Date.now();
+    try {
+      const items = await fn();
+      raw.push(...items);
+      job.sources.push({ name, status: "ok", count: items.length, ms: Date.now() - started });
+    } catch (error) {
+      job.sources.push({ name, status: "failed", count: 0, ms: Date.now() - started, error: error.message });
+    }
+  }
+
+  const merged = new Map();
+  for (const item of raw) {
+    if (!item.title) continue;
+    const normalized = normalizeTopic(item);
+    const key = normalized.title.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "").slice(0, 42);
+    const existing = merged.get(key);
+    if (!existing || normalized.heat > existing.heat) merged.set(key, normalized);
+  }
+
+  const oldTopics = new Map(memory.topics.map((topic) => [topic.id, topic]));
+  memory.topics = [...merged.values()]
+    .map((topic) => {
+      const old = oldTopics.get(topic.id);
+      if (old) {
+        return {
+          ...topic,
+          firstSeenAt: old.firstSeenAt || topic.crawledAt,
+          heat: Math.max(topic.heat, old.heat * 0.92),
+        };
+      }
+      return { ...topic, firstSeenAt: topic.crawledAt };
+    })
+    .sort((a, b) => b.heat - a.heat)
+    .slice(0, 120);
+
+  job.status = "success";
+  job.finishedAt = nowIso();
+  job.message = `抓取 ${raw.length} 条，归并 ${memory.topics.length} 个热点`;
+  memory.lastRefreshAt = nowIso();
+  memory.stats = {
+    discovered: memory.topics.length,
+    hot: memory.topics.filter((topic) => topic.heat >= settings.heatThreshold).length,
+    generated: memory.stats.generated || 0,
+    pushed: pushLog.filter((item) => item.status === "sent" || item.status === "simulated").length,
+    failedSources: job.sources.filter((source) => source.status === "failed").length,
+    activeSources: job.sources.filter((source) => source.status === "ok").length,
+  };
+  refreshInFlight = false;
+  persist();
+  return memory;
+}
+
+function filteredTopics(query) {
+  const params = new URLSearchParams(query);
+  const platform = params.get("platform") || "全部";
+  const category = params.get("category") || "全部";
+  const region = params.get("region") || "全球";
+  const keyword = (params.get("q") || "").toLowerCase().trim();
+  return memory.topics.filter((topic) => {
+    const platformOk = platform === "全部" || topic.platform === platform;
+    const categoryOk = category === "全部" || topic.category === category;
+    const regionOk = region === "全球" || topic.region === region || topic.region === "全球";
+    const keywordOk = !keyword || `${topic.title} ${topic.desc} ${topic.keywords.join(" ")}`.toLowerCase().includes(keyword);
+    return platformOk && categoryOk && regionOk && keywordOk;
+  });
+}
+
+function radar() {
+  const counts = new Map();
+  for (const topic of memory.topics) {
+    for (const word of topic.keywords) {
+      const row = counts.get(word) || { keyword: word, count: 0, heat: 0, risk: 0, topics: [] };
+      row.count += 1;
+      row.heat += topic.heat;
+      row.risk += topic.risk === "高" ? 3 : topic.risk === "中" ? 2 : 1;
+      row.topics.push(topic.title);
+      counts.set(word, row);
+    }
+  }
+  return [...counts.values()]
+    .map((row) => ({
+      ...row,
+      heat: Number((row.heat / row.count).toFixed(1)),
+      risk: Number((row.risk / row.count).toFixed(1)),
+      topics: row.topics.slice(0, 4),
+    }))
+    .sort((a, b) => b.heat * b.count - a.heat * a.count)
+    .slice(0, 40);
+}
+
+function analytics() {
+  const byCategory = groupCount(memory.topics, "category");
+  const byPlatform = groupCount(memory.topics, "platform");
+  const byRisk = groupCount(memory.topics, "risk");
+  const timeline = Array.from({ length: 12 }, (_, index) => {
+    const slice = memory.topics.slice(index * 8, index * 8 + 8);
+    return {
+      label: `${index * 2}:00`,
+      heat: Number((slice.reduce((sum, topic) => sum + topic.heat, 0) / Math.max(slice.length, 1)).toFixed(1)),
+      count: slice.length,
+    };
+  });
+  return { byCategory, byPlatform, byRisk, timeline };
+}
+
+function groupCount(rows, field) {
+  const map = new Map();
+  for (const row of rows) map.set(row[field], (map.get(row[field]) || 0) + 1);
+  return [...map.entries()].map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+}
+
+async function readBody(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const text = Buffer.concat(chunks).toString("utf8");
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
+}
+
+function json(res, payload, status = 200) {
+  res.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  res.end(JSON.stringify(payload));
+}
+
+function serveStatic(req, res) {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const pathname = url.pathname === "/" ? "/index.html" : url.pathname;
+  const filePath = resolve(distDir, `.${pathname}`);
+  if (!filePath.startsWith(distDir) || !existsSync(filePath)) {
+    const indexPath = join(distDir, "index.html");
+    if (existsSync(indexPath)) {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(readFileSync(indexPath));
+      return;
+    }
+    res.writeHead(404);
+    res.end("Not found");
+    return;
+  }
+  const type = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+  }[extname(filePath)] || "application/octet-stream";
+  res.writeHead(200, { "content-type": type });
+  res.end(readFileSync(filePath));
+}
+
+async function handleApi(req, res) {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  if (req.method === "GET" && url.pathname === "/api/health") {
+    return json(res, { ok: true, lastRefreshAt: memory.lastRefreshAt, topics: memory.topics.length });
+  }
+  if (req.method === "GET" && url.pathname === "/api/topics") {
+    return json(res, { topics: filteredTopics(url.search), stats: memory.stats, lastRefreshAt: memory.lastRefreshAt });
+  }
+  if (req.method === "POST" && url.pathname === "/api/refresh") {
+    const next = await runRefresh({ manual: true });
+    return json(res, { ok: true, topics: next.topics, stats: next.stats, jobs: next.jobs });
+  }
+  if (req.method === "GET" && url.pathname === "/api/radar") {
+    return json(res, { keywords: radar(), topics: memory.topics.slice(0, 20) });
+  }
+  if (req.method === "GET" && url.pathname === "/api/analytics") {
+    return json(res, { stats: memory.stats, analytics: analytics(), lastRefreshAt: memory.lastRefreshAt });
+  }
+  if (req.method === "GET" && url.pathname === "/api/jobs") {
+    return json(res, { jobs: memory.jobs, refreshInFlight });
+  }
+  if (req.method === "GET" && url.pathname === "/api/settings") {
+    return json(res, { settings });
+  }
+  if (req.method === "POST" && url.pathname === "/api/settings") {
+    const body = await readBody(req);
+    settings = { ...settings, ...body, sources: { ...settings.sources, ...(body.sources || {}) }, telegram: { ...settings.telegram, ...(body.telegram || {}) } };
+    persist();
+    scheduleAutoRefresh();
+    return json(res, { ok: true, settings });
+  }
+  if (req.method === "GET" && url.pathname === "/api/assets") {
+    return json(res, { assets });
+  }
+  if (req.method === "POST" && url.pathname === "/api/assets") {
+    const body = await readBody(req);
+    const asset = { id: idFor(`${Date.now()}:${body.name}`), type: body.type || "素材", name: body.name || "未命名素材", description: body.description || "", tags: body.tags || [] };
+    assets.unshift(asset);
+    persist();
+    return json(res, { ok: true, asset, assets });
+  }
+  if (req.method === "POST" && url.pathname === "/api/content/generate") {
+    const body = await readBody(req);
+    const topic = memory.topics.find((item) => item.id === body.topicId) || memory.topics[0];
+    if (!topic) return json(res, { error: "暂无热点，请先刷新抓取" }, 400);
+    const mode = body.mode || "快讯版";
+    memory.stats.generated += 1;
+    persist();
+    return json(res, { topic, mode, text: topic.publishCopy[mode] || makeCopies(topic).快讯版 });
+  }
+  if (req.method === "GET" && url.pathname === "/api/push/log") {
+    return json(res, { pushLog, telegramEnabled: Boolean(settings.telegram.enabled && settings.telegram.botToken && settings.telegram.chatId) });
+  }
+  if (req.method === "POST" && url.pathname === "/api/push/send") {
+    const body = await readBody(req);
+    const text = body.text || "";
+    const entry = { id: idFor(`${Date.now()}:${text}`), text, createdAt: nowIso(), status: "simulated", target: "local" };
+    if (settings.telegram.enabled && settings.telegram.botToken && settings.telegram.chatId) {
+      try {
+        const result = await fetchJson(`https://api.telegram.org/bot${settings.telegram.botToken}/sendMessage`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ chat_id: settings.telegram.chatId, text }),
+        });
+        entry.status = result.ok ? "sent" : "failed";
+        entry.target = "telegram";
+      } catch (error) {
+        entry.status = "failed";
+        entry.error = error.message;
+      }
+    }
+    pushLog.unshift(entry);
+    memory.stats.pushed = pushLog.filter((item) => item.status === "sent" || item.status === "simulated").length;
+    persist();
+    return json(res, { ok: entry.status !== "failed", entry, pushLog });
+  }
+  return json(res, { error: "Not found" }, 404);
+}
+
+const server = createServer(async (req, res) => {
+  try {
+    if (req.url.startsWith("/api/")) return await handleApi(req, res);
+    return serveStatic(req, res);
+  } catch (error) {
+    console.error(error);
+    return json(res, { error: error.message || "Internal error" }, 500);
+  }
+});
+
+server.listen(port, async () => {
+  console.log(`AI hot topics API listening on http://localhost:${port}`);
+  console.log(`Data directory: ${dataDir}`);
+  scheduleAutoRefresh();
+  if (initialRefresh && !memory.topics.length) {
+    runRefresh({ manual: false }).catch((error) => console.error("initial refresh failed", error));
+  }
+});
