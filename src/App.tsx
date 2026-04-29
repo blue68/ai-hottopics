@@ -9,7 +9,6 @@ import {
   Crosshair,
   Database,
   ExternalLink,
-  Filter,
   Flame,
   Gauge,
   HelpCircle,
@@ -82,12 +81,22 @@ type SettingsModel = {
   heatThreshold: number;
   riskThreshold: string;
   sources: Record<string, boolean>;
+  sourceConfig: {
+    twitter: { bearerToken: string; query: string; lang: string; maxResults: number; queryMaxChars: number };
+    weibo: { mode: string; rsshubBaseUrl: string; rssUrl: string };
+    github: { token: string };
+    reddit: { userAgent: string };
+  };
   keywords: string[];
   blockedWords: string[];
   telegram: { enabled: boolean; botToken: string; chatId: string };
+  feishu: { enabled: boolean; webhookUrl: string; secret: string };
 };
 
 type Asset = { id: string; type: string; name: string; description: string; tags: string[] };
+type PushChannel = "local" | "telegram" | "feishu";
+type PushLogEntry = { id: string; text: string; createdAt: string; status: string; target: string; error?: string };
+type PushChannels = Record<PushChannel, boolean>;
 type KeywordRow = { keyword: string; count: number; heat: number; risk: number; topics: string[] };
 type AnalyticsModel = {
   byCategory: Array<{ name: string; value: number }>;
@@ -99,6 +108,22 @@ type AnalyticsModel = {
 const copyModes = ["快讯版", "锐评版", "Thread版", "Meme版", "带节奏版"];
 const categories = ["全部", "AI", "Crypto", "地缘政治", "猎奇", "整活/Meme", "生活百科"];
 const regions = ["全球", "中国", "美国", "日本", "韩国"];
+const sourcePlatformLabels: Record<string, string> = {
+  twitter: "X",
+  weibo: "微博",
+  hackerNews: "Hacker News",
+  arxiv: "arXiv",
+  googleNews: "Google News",
+  github: "GitHub",
+  reddit: "Reddit",
+  coingecko: "CoinGecko",
+};
+const configurableSources = new Set(["twitter", "weibo", "github", "reddit"]);
+const pushChannelLabels: Record<PushChannel, string> = {
+  local: "本地记录",
+  telegram: "Telegram",
+  feishu: "飞书机器人",
+};
 
 const navItems: Array<{ key: ViewKey; label: string; icon: typeof Gauge; badge?: string }> = [
   { key: "dashboard", label: "Dashboard", icon: Gauge },
@@ -126,6 +151,11 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
 
 function classNames(...items: Array<string | false | undefined>) {
   return items.filter(Boolean).join(" ");
+}
+
+async function copyText(value: string) {
+  if (!value) return;
+  await navigator.clipboard?.writeText(value);
 }
 
 function timeAgo(value?: string | null) {
@@ -173,6 +203,15 @@ function MiniBars({ rows }: { rows: Array<{ name: string; value: number }> }) {
       ))}
     </div>
   );
+}
+
+function groupTopicCounts(topics: Topic[], field: keyof Topic) {
+  const counts = new Map<string, number>();
+  for (const topic of topics) {
+    const value = String(topic[field] || "");
+    if (value) counts.set(value, (counts.get(value) || 0) + 1);
+  }
+  return [...counts.entries()].map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
 }
 
 function Sidebar({
@@ -255,12 +294,16 @@ function Header({
   refresh,
   refreshing,
   lastRefreshAt,
+  openTasks,
+  openHelp,
 }: {
   query: string;
   setQuery: (value: string) => void;
   refresh: () => void;
   refreshing: boolean;
   lastRefreshAt: string | null;
+  openTasks: () => void;
+  openHelp: () => void;
 }) {
   return (
     <header className="topbar">
@@ -277,10 +320,10 @@ function Header({
         </button>
       </div>
       <div className="top-actions">
-        <button aria-label="通知" className="icon-button has-dot">
+        <button aria-label="通知" className="icon-button has-dot" onClick={openTasks} title="查看任务与告警">
           <Bell size={19} />
         </button>
-        <button aria-label="帮助" className="icon-button">
+        <button aria-label="帮助" className="icon-button" onClick={openHelp} title="查看配置帮助">
           <HelpCircle size={19} />
         </button>
       </div>
@@ -345,9 +388,6 @@ function FilterBar({
               {item}
             </button>
           ))}
-          <button>
-            <Filter size={14} /> 筛选
-          </button>
         </div>
       </div>
     </section>
@@ -519,6 +559,7 @@ function DashboardPage({
   setSelectedId,
   setActiveView,
   analytics,
+  heatThreshold = 72,
 }: {
   topics: Topic[];
   stats: Stats;
@@ -526,7 +567,15 @@ function DashboardPage({
   setSelectedId: (id: string) => void;
   setActiveView: (view: ViewKey) => void;
   analytics?: AnalyticsModel;
+  heatThreshold?: number;
 }) {
+  const dashboardStats = {
+    ...stats,
+    discovered: topics.length,
+    hot: topics.filter((topic) => topic.heat >= heatThreshold).length,
+  };
+  const platformRows = groupTopicCounts(topics, "platform");
+
   return (
     <div className="main-grid">
       <TopicTable topics={topics} selectedId={selected?.id} setSelectedId={setSelectedId} />
@@ -536,8 +585,8 @@ function DashboardPage({
           <div className="panel-title">趋势概览</div>
         </div>
         <div className="metric-grid">
-          <Metric label="发现热点" value={stats.discovered} icon={<Flame size={20} />} />
-          <Metric label="高热热点" value={stats.hot} icon={<Zap size={20} />} />
+          <Metric label="发现热点" value={dashboardStats.discovered} icon={<Flame size={20} />} />
+          <Metric label="高热热点" value={dashboardStats.hot} icon={<Zap size={20} />} />
           <Metric label="可用数据源" value={stats.activeSources} icon={<Database size={20} />} />
           <Metric label="失败数据源" value={stats.failedSources} icon={<ShieldAlert size={20} />} />
         </div>
@@ -573,7 +622,7 @@ function DashboardPage({
       </section>
       <section className="panel distribution-panel">
         <div className="panel-title">热点分布</div>
-        <MiniBars rows={analytics?.byPlatform || []} />
+        <MiniBars rows={platformRows.length ? platformRows : analytics?.byPlatform || []} />
       </section>
     </div>
   );
@@ -612,11 +661,33 @@ function RadarPage({ keywords, setQuery }: { keywords: KeywordRow[]; setQuery: (
   );
 }
 
-function ContentFactoryPage({ topics, selected, onGenerated }: { topics: Topic[]; selected?: Topic; onGenerated: () => void }) {
+function ContentFactoryPage({
+  topics,
+  selected,
+  assets,
+  selectedAssetId,
+  setSelectedAssetId,
+  pushTarget,
+  setPushTarget,
+  pushChannels,
+  onGenerated,
+}: {
+  topics: Topic[];
+  selected?: Topic;
+  assets: Asset[];
+  selectedAssetId: string;
+  setSelectedAssetId: (id: string) => void;
+  pushTarget: PushChannel;
+  setPushTarget: (channel: PushChannel) => void;
+  pushChannels: PushChannels;
+  onGenerated: () => void;
+}) {
   const [topicId, setTopicId] = useState(selected?.id || "");
   const [mode, setMode] = useState(copyModes[0]);
   const [text, setText] = useState("");
   const topic = topics.find((item) => item.id === topicId) || selected || topics[0];
+  const selectedAsset = assets.find((asset) => asset.id === selectedAssetId);
+  const draftText = text || topic?.publishCopy[mode] || "";
 
   useEffect(() => {
     if (topic && !topicId) setTopicId(topic.id);
@@ -626,14 +697,15 @@ function ContentFactoryPage({ topics, selected, onGenerated }: { topics: Topic[]
     if (!topic) return;
     const data = await api<{ text: string }>("/api/content/generate", {
       method: "POST",
-      body: JSON.stringify({ topicId: topic.id, mode }),
+      body: JSON.stringify({ topicId: topic.id, mode, assetId: selectedAssetId || undefined }),
     });
     setText(data.text);
     onGenerated();
   }
 
   async function push() {
-    await api("/api/push/send", { method: "POST", body: JSON.stringify({ text: text || topic?.publishCopy[mode] }) });
+    await api("/api/push/send", { method: "POST", body: JSON.stringify({ text: draftText, target: pushTarget }) });
+    onGenerated();
   }
 
   return (
@@ -666,6 +738,33 @@ function ContentFactoryPage({ topics, selected, onGenerated }: { topics: Topic[]
               </button>
             ))}
           </div>
+          <label>
+            账号素材
+            <select value={selectedAssetId} onChange={(event) => setSelectedAssetId(event.target.value)}>
+              <option value="">不使用素材</option>
+              {assets.map((asset) => (
+                <option key={asset.id} value={asset.id}>
+                  {asset.type} · {asset.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            推送渠道
+            <select value={pushTarget} onChange={(event) => setPushTarget(event.target.value as PushChannel)}>
+              {(Object.keys(pushChannelLabels) as PushChannel[]).map((channel) => (
+                <option key={channel} value={channel}>
+                  {pushChannelLabels[channel]}{pushChannels[channel] ? "" : "（未配置）"}
+                </option>
+              ))}
+            </select>
+          </label>
+          {selectedAsset && (
+            <div className="source-insight">
+              <strong>{selectedAsset.name}</strong>
+              <span>{selectedAsset.description}</span>
+            </div>
+          )}
           {topic && (
             <div className="source-insight">
               <strong>{topic.title}</strong>
@@ -674,17 +773,14 @@ function ContentFactoryPage({ topics, selected, onGenerated }: { topics: Topic[]
           )}
         </div>
         <div className="composer large-composer">
-          <textarea value={text || topic?.publishCopy[mode] || ""} onChange={(event) => setText(event.target.value)} />
+          <textarea value={draftText} onChange={(event) => setText(event.target.value)} />
           <div className="composer-footer">
-            <span>{(text || topic?.publishCopy[mode] || "").length} / 280</span>
-            <button onClick={() => navigator.clipboard?.writeText(text || topic?.publishCopy[mode] || "")}>
+            <span>{draftText.length} / 280</span>
+            <button onClick={() => copyText(draftText)}>
               <Copy size={16} /> 复制
             </button>
-            <button className="publish-button" onClick={push}>
-              <Send size={16} /> 推送
-            </button>
-            <button className="dropdown" aria-label="更多">
-              <ChevronDown size={16} />
+            <button className="publish-button" onClick={push} disabled={!draftText}>
+              <Send size={16} /> 推送至{pushChannelLabels[pushTarget]}
             </button>
           </div>
         </div>
@@ -693,12 +789,34 @@ function ContentFactoryPage({ topics, selected, onGenerated }: { topics: Topic[]
   );
 }
 
-function PushCenterPage({ pushLog, reload }: { pushLog: Array<Record<string, string>>; reload: () => void }) {
+function PushCenterPage({
+  pushLog,
+  settings,
+  setSettings,
+  saveSettings,
+  pushTarget,
+  setPushTarget,
+  pushChannels,
+  reload,
+}: {
+  pushLog: PushLogEntry[];
+  settings?: SettingsModel;
+  setSettings: (value: SettingsModel) => void;
+  saveSettings: () => Promise<void>;
+  pushTarget: PushChannel;
+  setPushTarget: (channel: PushChannel) => void;
+  pushChannels: PushChannels;
+  reload: () => void;
+}) {
   const [text, setText] = useState("热点系统测试推送：本地链路正常。");
   async function send() {
-    await api("/api/push/send", { method: "POST", body: JSON.stringify({ text }) });
+    await api("/api/push/send", { method: "POST", body: JSON.stringify({ text, target: pushTarget }) });
     reload();
   }
+  const updateFeishu = (patch: Partial<SettingsModel["feishu"]>) => {
+    if (!settings) return;
+    setSettings({ ...settings, feishu: { ...settings.feishu, ...patch } });
+  };
   return (
     <section className="panel full-panel">
       <div className="panel-title-row">
@@ -706,13 +824,46 @@ function PushCenterPage({ pushLog, reload }: { pushLog: Array<Record<string, str
           <Send size={18} />
           推送中心
         </div>
-        <button onClick={send}>
-          <Send size={16} /> 发送测试
-        </button>
+        <div className="panel-actions">
+          <button onClick={() => copyText(text)}>
+            <Copy size={16} /> 复制
+          </button>
+          <button onClick={send}>
+            <Send size={16} /> 发送到{pushChannelLabels[pushTarget]}
+          </button>
+        </div>
       </div>
       <div className="push-grid">
         <div className="composer large-composer">
+          <label>
+            推送渠道
+            <select value={pushTarget} onChange={(event) => setPushTarget(event.target.value as PushChannel)}>
+              {(Object.keys(pushChannelLabels) as PushChannel[]).map((channel) => (
+                <option key={channel} value={channel}>
+                  {pushChannelLabels[channel]}{pushChannels[channel] ? "" : "（未配置）"}
+                </option>
+              ))}
+            </select>
+          </label>
           <textarea value={text} onChange={(event) => setText(event.target.value)} />
+          {settings && (
+            <div className="source-config-panel push-config-panel">
+              <b>飞书机器人</b>
+              <label className="toggle-row">
+                <span>启用飞书推送</span>
+                <input type="checkbox" checked={settings.feishu.enabled} onChange={(event) => updateFeishu({ enabled: event.target.checked })} />
+              </label>
+              <label>
+                Webhook URL
+                <input value={settings.feishu.webhookUrl} onChange={(event) => updateFeishu({ webhookUrl: event.target.value })} />
+              </label>
+              <label>
+                签名密钥
+                <input type="password" value={settings.feishu.secret} onChange={(event) => updateFeishu({ secret: event.target.value })} />
+              </label>
+              <button onClick={saveSettings}>保存飞书配置</button>
+            </div>
+          )}
         </div>
         <div className="log-list">
           {pushLog.map((item) => (
@@ -721,6 +872,7 @@ function PushCenterPage({ pushLog, reload }: { pushLog: Array<Record<string, str
               <strong>{item.status}</strong>
               <span>{item.target} · {timeAgo(item.createdAt)}</span>
               <p>{item.text}</p>
+              {item.error && <em>{item.error}</em>}
             </div>
           ))}
         </div>
@@ -729,7 +881,15 @@ function PushCenterPage({ pushLog, reload }: { pushLog: Array<Record<string, str
   );
 }
 
-function AssetsPage({ assets, reload }: { assets: Asset[]; reload: () => void }) {
+function AssetsPage({
+  assets,
+  useAsset,
+  reload,
+}: {
+  assets: Asset[];
+  useAsset: (assetId: string) => void;
+  reload: () => void;
+}) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   async function addAsset() {
@@ -759,6 +919,9 @@ function AssetsPage({ assets, reload }: { assets: Asset[]; reload: () => void })
             <strong>{asset.name}</strong>
             <p>{asset.description}</p>
             <div>{asset.tags.map((tag) => <em key={tag}>{tag}</em>)}</div>
+            <button onClick={() => useAsset(asset.id)}>
+              <PenSquare size={15} /> 用于内容工厂
+            </button>
           </article>
         ))}
       </div>
@@ -839,6 +1002,17 @@ function AnalyticsPage({ stats, analytics }: { stats: Stats; analytics?: Analyti
 function SettingsPage({ settings, setSettings, save }: { settings?: SettingsModel; setSettings: (value: SettingsModel) => void; save: () => void }) {
   if (!settings) return null;
   const updateSource = (key: string, checked: boolean) => setSettings({ ...settings, sources: { ...settings.sources, [key]: checked } });
+  const updateSourceConfig = <K extends keyof SettingsModel["sourceConfig"]>(
+    source: K,
+    patch: Partial<SettingsModel["sourceConfig"][K]>,
+  ) => setSettings({
+    ...settings,
+    sourceConfig: {
+      ...settings.sourceConfig,
+      [source]: { ...settings.sourceConfig[source], ...patch },
+    },
+  });
+
   return (
     <section className="panel full-panel">
       <div className="panel-title-row">
@@ -853,10 +1027,127 @@ function SettingsPage({ settings, setSettings, save }: { settings?: SettingsMode
           <strong>数据源</strong>
           {Object.entries(settings.sources).map(([key, value]) => (
             <label className="toggle-row" key={key}>
-              <span>{key}</span>
+              <span>
+                {sourcePlatformLabels[key] || key}
+                {configurableSources.has(key) && <em>需配置</em>}
+              </span>
               <input type="checkbox" checked={value} onChange={(event) => updateSource(key, event.target.checked)} />
             </label>
           ))}
+        </div>
+        <div className="settings-block source-config-block">
+          <strong>数据源参数</strong>
+          {settings.sources.twitter && (
+            <div className="source-config-panel">
+              <b>X / Twitter</b>
+              <label>
+                Bearer Token
+                <input
+                  type="password"
+                  value={settings.sourceConfig.twitter.bearerToken}
+                  onChange={(event) => updateSourceConfig("twitter", { bearerToken: event.target.value })}
+                  placeholder="必填，用于 X API v2 Recent Search"
+                />
+              </label>
+              <label>
+                自定义查询
+                <input
+                  value={settings.sourceConfig.twitter.query}
+                  onChange={(event) => updateSourceConfig("twitter", { query: event.target.value })}
+                  placeholder='留空时使用关键词组合，例如 (OpenAI OR agent) -is:retweet'
+                />
+              </label>
+              <div className="compact-field-grid">
+                <label>
+                  语言
+                  <input
+                    value={settings.sourceConfig.twitter.lang}
+                    onChange={(event) => updateSourceConfig("twitter", { lang: event.target.value })}
+                    placeholder="en / zh"
+                  />
+                </label>
+                <label>
+                  数量
+                  <input
+                    type="number"
+                    min={10}
+                    max={100}
+                    value={settings.sourceConfig.twitter.maxResults}
+                    onChange={(event) => updateSourceConfig("twitter", { maxResults: Number(event.target.value) })}
+                  />
+                </label>
+                <label>
+                  查询长度
+                  <input
+                    type="number"
+                    min={1}
+                    max={4096}
+                    value={settings.sourceConfig.twitter.queryMaxChars}
+                    onChange={(event) => updateSourceConfig("twitter", { queryMaxChars: Number(event.target.value) })}
+                  />
+                </label>
+              </div>
+            </div>
+          )}
+          {settings.sources.weibo && (
+            <div className="source-config-panel">
+              <b>微博热搜</b>
+              <label>
+                抓取模式
+                <select value={settings.sourceConfig.weibo.mode} onChange={(event) => updateSourceConfig("weibo", { mode: event.target.value })}>
+                  <option value="auto">auto</option>
+                  <option value="rsshub">rsshub</option>
+                  <option value="direct">direct</option>
+                </select>
+              </label>
+              <label>
+                RSSHub 地址
+                <input
+                  value={settings.sourceConfig.weibo.rsshubBaseUrl}
+                  onChange={(event) => updateSourceConfig("weibo", { rsshubBaseUrl: event.target.value })}
+                  placeholder="https://rsshub.app"
+                />
+              </label>
+              <label>
+                自定义 RSS 路由
+                <input
+                  value={settings.sourceConfig.weibo.rssUrl}
+                  onChange={(event) => updateSourceConfig("weibo", { rssUrl: event.target.value })}
+                  placeholder="https://your-rsshub.example.com/weibo/search/hot"
+                />
+              </label>
+            </div>
+          )}
+          {settings.sources.github && (
+            <div className="source-config-panel">
+              <b>GitHub Search</b>
+              <label>
+                GitHub Token
+                <input
+                  type="password"
+                  value={settings.sourceConfig.github.token}
+                  onChange={(event) => updateSourceConfig("github", { token: event.target.value })}
+                  placeholder="可选，用于提升 API 限流额度"
+                />
+              </label>
+            </div>
+          )}
+          {settings.sources.reddit && (
+            <div className="source-config-panel">
+              <b>Reddit JSON</b>
+              <label>
+                User-Agent
+                <input
+                  value={settings.sourceConfig.reddit.userAgent}
+                  onChange={(event) => updateSourceConfig("reddit", { userAgent: event.target.value })}
+                  placeholder="ai-hottopics/0.1 (+local research dashboard)"
+                />
+              </label>
+            </div>
+          )}
+          {!Object.entries(settings.sources).some(([key, enabled]) => enabled && configurableSources.has(key)) && (
+            <p className="settings-hint">勾选 X、微博、GitHub 或 Reddit 后，这里会出现对应抓取参数。</p>
+          )}
         </div>
         <div className="settings-block">
           <strong>阈值与词库</strong>
@@ -928,10 +1219,14 @@ export function App() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [settings, setSettings] = useState<SettingsModel>();
   const [assets, setAssets] = useState<Asset[]>([]);
-  const [pushLog, setPushLog] = useState<Array<Record<string, string>>>([]);
+  const [selectedAssetId, setSelectedAssetId] = useState("");
+  const [pushTarget, setPushTarget] = useState<PushChannel>("local");
+  const [pushChannels, setPushChannels] = useState<PushChannels>({ local: true, telegram: false, feishu: false });
+  const [pushLog, setPushLog] = useState<PushLogEntry[]>([]);
   const [keywords, setKeywords] = useState<KeywordRow[]>([]);
   const [analytics, setAnalytics] = useState<AnalyticsModel>();
   const [error, setError] = useState("");
+  const [showHelp, setShowHelp] = useState(false);
 
   const loadAll = async () => {
     try {
@@ -941,7 +1236,7 @@ export function App() {
         api<{ jobs: Job[] }>("/api/jobs"),
         api<{ settings: SettingsModel }>("/api/settings"),
         api<{ assets: Asset[] }>("/api/assets"),
-        api<{ pushLog: Array<Record<string, string>> }>("/api/push/log"),
+        api<{ pushLog: PushLogEntry[]; channels: PushChannels }>("/api/push/log"),
         api<{ keywords: KeywordRow[] }>("/api/radar"),
         api<{ analytics: AnalyticsModel; stats: Stats }>("/api/analytics"),
       ]);
@@ -952,6 +1247,7 @@ export function App() {
       setSettings(settingsData.settings);
       setAssets(assetsData.assets);
       setPushLog(pushData.pushLog);
+      setPushChannels({ local: true, telegram: Boolean(pushData.channels?.telegram), feishu: Boolean(pushData.channels?.feishu) });
       setKeywords(radarData.keywords);
       setAnalytics(analyticsData.analytics);
       if (!selectedId && topicData.topics[0]) setSelectedId(topicData.topics[0].id);
@@ -986,14 +1282,47 @@ export function App() {
   }
 
   const selected = useMemo(() => topics.find((topic) => topic.id === selectedId) || topics[0], [topics, selectedId]);
-  const platforms = useMemo(() => [...new Set(topics.map((topic) => topic.platform))].filter(Boolean), [topics]);
+  const platforms = useMemo(() => {
+    const names = new Set<string>();
+    const sourceEntries = Object.entries(settings?.sources || {});
+    for (const [key, enabled] of sourceEntries) {
+      if (enabled) names.add(sourcePlatformLabels[key] || key);
+    }
+    if (!sourceEntries.length) {
+      for (const row of analytics?.byPlatform || []) names.add(row.name);
+      for (const topic of topics) names.add(topic.platform);
+    }
+    return [...names].filter(Boolean);
+  }, [settings?.sources, analytics?.byPlatform, topics]);
 
   return (
     <div className="app-shell">
       <Sidebar activeView={activeView} setActiveView={setActiveView} stats={stats} />
       <main className="workspace">
-        <Header query={query} setQuery={setQuery} refresh={refresh} refreshing={refreshing} lastRefreshAt={lastRefreshAt} />
+        <Header
+          query={query}
+          setQuery={setQuery}
+          refresh={refresh}
+          refreshing={refreshing}
+          lastRefreshAt={lastRefreshAt}
+          openTasks={() => setActiveView("tasks")}
+          openHelp={() => setShowHelp((value) => !value)}
+        />
         {error && <div className="error-banner">{error}</div>}
+        {showHelp && (
+          <section className="panel top-help-panel">
+            <button aria-label="关闭帮助" className="ghost-icon" onClick={() => setShowHelp(false)}>
+              <X size={16} />
+            </button>
+            <strong>快速入口</strong>
+            <p>喇叭会打开任务与数据源告警；内容工厂可以选择账号素材和推送渠道；飞书机器人在推送中心配置。</p>
+            <div>
+              <button onClick={() => { setActiveView("assets"); setShowHelp(false); }}>账号素材库</button>
+              <button onClick={() => { setActiveView("push"); setShowHelp(false); }}>推送中心</button>
+              <button onClick={() => { setActiveView("settings"); setShowHelp(false); }}>设置中心</button>
+            </div>
+          </section>
+        )}
         {(activeView === "dashboard" || activeView === "hotlist") && (
           <FilterBar
             platform={platform}
@@ -1006,7 +1335,15 @@ export function App() {
           />
         )}
         {activeView === "dashboard" && (
-          <DashboardPage topics={topics} stats={stats} selected={selected} setSelectedId={setSelectedId} setActiveView={setActiveView} analytics={analytics} />
+          <DashboardPage
+            topics={topics}
+            stats={stats}
+            selected={selected}
+            setSelectedId={setSelectedId}
+            setActiveView={setActiveView}
+            analytics={analytics}
+            heatThreshold={settings?.heatThreshold}
+          />
         )}
         {activeView === "hotlist" && (
           <div className="main-grid single-focus">
@@ -1015,9 +1352,32 @@ export function App() {
           </div>
         )}
         {activeView === "radar" && <RadarPage keywords={keywords} setQuery={(value) => { setQuery(value); setActiveView("hotlist"); }} />}
-        {activeView === "factory" && <ContentFactoryPage topics={topics} selected={selected} onGenerated={loadAll} />}
-        {activeView === "push" && <PushCenterPage pushLog={pushLog} reload={loadAll} />}
-        {activeView === "assets" && <AssetsPage assets={assets} reload={loadAll} />}
+        {activeView === "factory" && (
+          <ContentFactoryPage
+            topics={topics}
+            selected={selected}
+            assets={assets}
+            selectedAssetId={selectedAssetId}
+            setSelectedAssetId={setSelectedAssetId}
+            pushTarget={pushTarget}
+            setPushTarget={setPushTarget}
+            pushChannels={pushChannels}
+            onGenerated={loadAll}
+          />
+        )}
+        {activeView === "push" && (
+          <PushCenterPage
+            pushLog={pushLog}
+            settings={settings}
+            setSettings={setSettings}
+            saveSettings={saveSettings}
+            pushTarget={pushTarget}
+            setPushTarget={setPushTarget}
+            pushChannels={pushChannels}
+            reload={loadAll}
+          />
+        )}
+        {activeView === "assets" && <AssetsPage assets={assets} useAsset={(assetId) => { setSelectedAssetId(assetId); setActiveView("factory"); }} reload={loadAll} />}
         {activeView === "tasks" && <TasksPage jobs={jobs} refresh={refresh} refreshing={refreshing} />}
         {activeView === "analytics" && <AnalyticsPage stats={stats} analytics={analytics} />}
         {activeView === "settings" && settings && <SettingsPage settings={settings} setSettings={setSettings} save={saveSettings} />}

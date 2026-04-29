@@ -320,6 +320,48 @@ button {
   gap: 12px;
 }
 
+.top-help-panel {
+  position: relative;
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 16px 48px 16px 16px;
+}
+
+.top-help-panel .ghost-icon {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+}
+
+.top-help-panel strong {
+  color: #fff;
+}
+
+.top-help-panel p {
+  margin: 0;
+  color: #aab8ce;
+}
+
+.top-help-panel div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.top-help-panel div button,
+.panel-actions button,
+.asset-card button,
+.push-config-panel button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 7px;
+}
+
 .icon-button {
   position: relative;
   display: grid;
@@ -920,7 +962,7 @@ button {
 
 .composer-footer {
   display: grid;
-  grid-template-columns: 1fr auto auto 42px;
+  grid-template-columns: 1fr auto auto;
   gap: 10px;
   align-items: center;
   padding: 0 16px 16px;
@@ -941,15 +983,9 @@ button {
   border-radius: 7px;
 }
 
-.composer-footer .publish-button,
-.composer-footer .dropdown {
+.composer-footer .publish-button {
   border-color: rgba(42, 105, 255, 0.85);
   background: linear-gradient(90deg, #0d66ff, #265dff);
-}
-
-.composer-footer .dropdown {
-  width: 42px;
-  padding: 0;
 }
 
 .trend-panel {
@@ -1363,7 +1399,8 @@ button {
 }
 
 .control-column label,
-.settings-block label {
+.settings-block label,
+.source-config-panel label {
   display: grid;
   gap: 7px;
   color: #d7e3f6;
@@ -1373,7 +1410,8 @@ button {
 select,
 .asset-editor input,
 .settings-block input,
-.settings-block textarea {
+.settings-block textarea,
+.source-config-panel input {
   width: 100%;
   min-height: 40px;
   border: 1px solid rgba(110, 138, 191, 0.22);
@@ -1385,7 +1423,8 @@ select,
 
 select,
 .asset-editor input,
-.settings-block input {
+.settings-block input,
+.source-config-panel input {
   padding: 0 11px;
 }
 
@@ -1461,6 +1500,30 @@ select,
   color: #c7d5ea;
 }
 
+.log-item em {
+  grid-column: 2 / -1;
+  color: #ff8ea0;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.panel-actions {
+  display: inline-flex;
+  gap: 10px;
+}
+
+.composer label {
+  display: grid;
+  gap: 7px;
+  margin: 0 16px 10px;
+  color: #d7e3f6;
+  font-weight: 800;
+}
+
+.push-config-panel {
+  margin: 0 16px 16px;
+}
+
 .asset-editor {
   display: grid;
   grid-template-columns: 260px 1fr;
@@ -1510,6 +1573,10 @@ select,
   color: #dce9ff;
   font-size: 12px;
   font-style: normal;
+}
+
+.asset-card button {
+  justify-self: start;
 }
 
 .job-card {
@@ -1609,9 +1676,54 @@ select,
   align-items: center;
 }
 
+.toggle-row span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.toggle-row em {
+  padding: 3px 6px;
+  border-radius: 5px;
+  background: rgba(255, 176, 32, 0.16);
+  color: #ffc561;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+}
+
 .toggle-row input {
   width: 42px;
   min-height: auto;
+}
+
+.source-config-block {
+  grid-column: span 2;
+}
+
+.source-config-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(104, 132, 186, 0.2);
+  border-radius: 8px;
+  background: rgba(8, 16, 30, 0.62);
+}
+
+.source-config-panel b {
+  color: #dce9ff;
+}
+
+.compact-field-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.settings-hint {
+  margin: 0;
+  color: #8fa0bc;
+  font-size: 13px;
 }
 
 .detail-summary {

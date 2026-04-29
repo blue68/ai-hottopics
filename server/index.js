@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, resolve } from "node:path";
@@ -27,6 +27,8 @@ const defaultSettings = {
   heatThreshold: Number(process.env.HEAT_THRESHOLD || 72),
   riskThreshold: "中",
   sources: {
+    twitter: parseBool(process.env.TWITTER_ENABLED, Boolean(process.env.X_BEARER_TOKEN || process.env.TWITTER_BEARER_TOKEN)),
+    weibo: parseBool(process.env.WEIBO_ENABLED, true),
     hackerNews: true,
     arxiv: true,
     googleNews: true,
@@ -34,12 +36,37 @@ const defaultSettings = {
     reddit: true,
     coingecko: true,
   },
+  sourceConfig: {
+    twitter: {
+      bearerToken: process.env.X_BEARER_TOKEN || process.env.TWITTER_BEARER_TOKEN || "",
+      query: process.env.X_SEARCH_QUERY || process.env.TWITTER_SEARCH_QUERY || "",
+      lang: process.env.X_SEARCH_LANG || process.env.TWITTER_SEARCH_LANG || "",
+      maxResults: Number(process.env.X_SEARCH_MAX_RESULTS || process.env.TWITTER_SEARCH_MAX_RESULTS || 50),
+      queryMaxChars: Number(process.env.X_SEARCH_QUERY_MAX_CHARS || process.env.TWITTER_SEARCH_QUERY_MAX_CHARS || 512),
+    },
+    weibo: {
+      mode: process.env.WEIBO_MODE || "auto",
+      rsshubBaseUrl: process.env.RSSHUB_BASE_URL || "https://rsshub.app",
+      rssUrl: process.env.WEIBO_RSS_URL || "",
+    },
+    github: {
+      token: process.env.GITHUB_TOKEN || "",
+    },
+    reddit: {
+      userAgent: process.env.REDDIT_USER_AGENT || "ai-hottopics/0.1 (+local research dashboard)",
+    },
+  },
   keywords: csv(process.env.TRACK_KEYWORDS, ["AI", "OpenAI", "Bitcoin", "crypto", "芯片", "电动车", "地缘政治", "robot", "agent"]),
   blockedWords: csv(process.env.BLOCKED_WORDS, ["广告", "招聘", "水贴", "博彩", "返利"]),
   telegram: {
     enabled: parseBool(process.env.TELEGRAM_ENABLED, false),
     botToken: process.env.TELEGRAM_BOT_TOKEN || "",
     chatId: process.env.TELEGRAM_CHAT_ID || "",
+  },
+  feishu: {
+    enabled: parseBool(process.env.FEISHU_ENABLED, false),
+    webhookUrl: process.env.FEISHU_WEBHOOK_URL || "",
+    secret: process.env.FEISHU_SECRET || "",
   },
 };
 
@@ -78,7 +105,16 @@ settings = {
   ...defaultSettings,
   ...settings,
   sources: { ...defaultSettings.sources, ...(settings.sources || {}) },
+  sourceConfig: {
+    ...defaultSettings.sourceConfig,
+    ...(settings.sourceConfig || {}),
+    twitter: { ...defaultSettings.sourceConfig.twitter, ...(settings.sourceConfig?.twitter || {}) },
+    weibo: { ...defaultSettings.sourceConfig.weibo, ...(settings.sourceConfig?.weibo || {}) },
+    github: { ...defaultSettings.sourceConfig.github, ...(settings.sourceConfig?.github || {}) },
+    reddit: { ...defaultSettings.sourceConfig.reddit, ...(settings.sourceConfig?.reddit || {}) },
+  },
   telegram: { ...defaultSettings.telegram, ...(settings.telegram || {}) },
+  feishu: { ...defaultSettings.feishu, ...(settings.feishu || {}) },
 };
 let assets = loadJson(assetsPath, defaultAssets);
 let pushLog = loadJson(pushPath, []);
@@ -181,11 +217,11 @@ function minutesAgo(dateValue) {
 
 function categoryFor(text) {
   const lower = text.toLowerCase();
-  if (/bitcoin|btc|crypto|ethereum|solana|token|coin|defi|链|比特币|加密/.test(lower)) return "Crypto";
+  if (/bitcoin|btc|crypto|ethereum|solana|token|coin|defi|链|比特币|加密|币圈|web3/.test(lower)) return "Crypto";
   if (/ai|openai|model|agent|robot|llm|sora|芯片|英伟达|大模型|人工智能|机器人/.test(lower)) return "AI";
   if (/war|israel|iran|russia|ukraine|tariff|election|protest|中东|以色列|伊朗|政治|选举|示威|关税/.test(lower)) return "地缘政治";
-  if (/meme|funny|viral|joke|梗|整活|笑/.test(lower)) return "整活/Meme";
-  if (/health|life|food|travel|生活|健康|旅游|教育/.test(lower)) return "生活百科";
+  if (/meme|funny|viral|joke|梗|整活|笑|热搜|爆了|塌房/.test(lower)) return "整活/Meme";
+  if (/health|life|food|travel|生活|健康|旅游|教育|明星|电影|综艺|直播/.test(lower)) return "生活百科";
   return "猎奇";
 }
 
@@ -257,7 +293,19 @@ function heatScore(raw) {
   const recency = Math.max(0, 42 - Math.sqrt(minutesAgo(raw.publishedAt || Date.now())) * 2.6);
   const engagement = Math.log10((raw.score || 0) + (raw.comments || 0) * 2 + 10) * 19;
   const sourceWeight =
-    raw.platform === "GitHub" ? 16 : raw.platform === "CoinGecko" ? 18 : raw.platform === "Hacker News" ? 18 : raw.platform === "arXiv" ? 15 : 10;
+    raw.platform === "X"
+      ? 20
+      : raw.platform === "微博"
+        ? 20
+        : raw.platform === "GitHub"
+          ? 16
+          : raw.platform === "CoinGecko"
+            ? 18
+            : raw.platform === "Hacker News"
+              ? 18
+              : raw.platform === "arXiv"
+                ? 15
+                : 10;
   return Math.max(30, Math.min(99.8, recency + engagement + sourceWeight));
 }
 
@@ -349,6 +397,16 @@ function makeCopies(topic) {
   };
 }
 
+function applyAssetContext(text, asset) {
+  if (!asset) return text;
+  const tags = Array.isArray(asset.tags) && asset.tags.length ? ` 标签：${asset.tags.join("、")}` : "";
+  return `${text}\n\n参考素材：${asset.name}（${asset.type || "素材"}）。${asset.description || ""}${tags}`.trim();
+}
+
+function feishuSignature(timestamp, secret) {
+  return createHmac("sha256", `${timestamp}\n${secret}`).update("").digest("base64");
+}
+
 async function fetchJson(url, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 9000);
@@ -362,8 +420,12 @@ async function fetchJson(url, options = {}) {
         ...(options.headers || {}),
       },
     });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    return await res.json();
+    const text = await res.text();
+    if (!res.ok) {
+      const detail = stripHtml(text).slice(0, 240);
+      throw new Error(`${res.status} ${res.statusText}${detail ? `: ${detail}` : ""}`);
+    }
+    return text ? JSON.parse(text) : {};
   } finally {
     clearTimeout(timer);
   }
@@ -385,6 +447,81 @@ async function fetchText(url) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function crawlTwitter() {
+  const config = settings.sourceConfig?.twitter || {};
+  const bearerToken = config.bearerToken || process.env.X_BEARER_TOKEN || process.env.TWITTER_BEARER_TOKEN;
+  if (!bearerToken) {
+    throw new Error("X_BEARER_TOKEN is not configured");
+  }
+
+  const query = twitterSearchQuery();
+  const params = new URLSearchParams({
+    query,
+    max_results: twitterMaxResults(),
+    "tweet.fields": "created_at,public_metrics,lang,author_id",
+    expansions: "author_id",
+    "user.fields": "name,username",
+  });
+  const data = await fetchJson(`https://api.x.com/2/tweets/search/recent?${params}`, {
+    headers: {
+      authorization: `Bearer ${bearerToken}`,
+    },
+  });
+  const users = new Map((data.includes?.users || []).map((user) => [user.id, user]));
+  return (data.data || []).map((tweet) => {
+    const metrics = tweet.public_metrics || {};
+    const user = users.get(tweet.author_id) || {};
+    const username = user.username || tweet.author_id || "unknown";
+    const score =
+      (metrics.like_count || 0) * 0.7 +
+      (metrics.retweet_count || 0) * 3 +
+      (metrics.reply_count || 0) * 2 +
+      (metrics.quote_count || 0) * 2.5;
+    return {
+      platform: "X",
+      source: "X Recent Search",
+      title: stripHtml(tweet.text).slice(0, 110),
+      desc: stripHtml(tweet.text),
+      url: `https://x.com/${username}/status/${tweet.id}`,
+      author: user.name || username,
+      publishedAt: tweet.created_at,
+      score: Math.round(score),
+      comments: metrics.reply_count || 0,
+    };
+  });
+}
+
+function twitterSearchQuery() {
+  const config = settings.sourceConfig?.twitter || {};
+  const override = (config.query || process.env.X_SEARCH_QUERY || process.env.TWITTER_SEARCH_QUERY || "").trim();
+  if (override) return assertTwitterQueryLength(override);
+
+  const terms = settings.keywords
+    .slice(0, 12)
+    .map((keyword) => keyword.trim())
+    .filter(Boolean)
+    .map((keyword) => (/\s/.test(keyword) ? `"${keyword.replace(/"/g, '\\"')}"` : keyword));
+  if (!terms.length) throw new Error("No keywords configured for X search");
+
+  const language = (config.lang || process.env.X_SEARCH_LANG || process.env.TWITTER_SEARCH_LANG || "").trim();
+  const languageFilter = /^[a-z]{2,3}$/i.test(language) ? ` lang:${language.toLowerCase()}` : "";
+  return assertTwitterQueryLength(`(${terms.join(" OR ")})${languageFilter} -is:retweet`);
+}
+
+function assertTwitterQueryLength(query) {
+  const configured = Number(settings.sourceConfig?.twitter?.queryMaxChars || process.env.X_SEARCH_QUERY_MAX_CHARS || process.env.TWITTER_SEARCH_QUERY_MAX_CHARS || 512);
+  const maxLength = Math.max(1, Math.min(4096, Number.isFinite(configured) ? Math.round(configured) : 512));
+  if (query.length > maxLength) {
+    throw new Error(`X search query exceeds ${maxLength} characters`);
+  }
+  return query;
+}
+
+function twitterMaxResults() {
+  const value = Number(settings.sourceConfig?.twitter?.maxResults || process.env.X_SEARCH_MAX_RESULTS || process.env.TWITTER_SEARCH_MAX_RESULTS || 50);
+  return String(Math.max(10, Math.min(100, Number.isFinite(value) ? Math.round(value) : 50)));
 }
 
 async function crawlHackerNews() {
@@ -449,7 +586,9 @@ async function crawlArxiv() {
 }
 
 async function crawlGithub() {
-  const data = await fetchJson("https://api.github.com/search/repositories?q=AI+OR+agent+OR+LLM+created:%3E2026-01-01&sort=updated&order=desc&per_page=20");
+  const token = settings.sourceConfig?.github?.token || process.env.GITHUB_TOKEN || "";
+  const headers = token ? { authorization: `Bearer ${token}` } : {};
+  const data = await fetchJson("https://api.github.com/search/repositories?q=AI+OR+agent+OR+LLM+created:%3E2026-01-01&sort=updated&order=desc&per_page=20", { headers });
   return (data.items || []).map((repo) => ({
     platform: "GitHub",
     source: "GitHub Search",
@@ -481,9 +620,10 @@ async function crawlCoinGecko() {
 async function crawlReddit() {
   const subs = ["artificial", "technology", "CryptoCurrency", "worldnews"];
   const results = [];
+  const userAgent = settings.sourceConfig?.reddit?.userAgent || process.env.REDDIT_USER_AGENT || "ai-hottopics/0.1 (+local research dashboard)";
   for (const sub of subs) {
     const data = await fetchJson(`https://www.reddit.com/r/${sub}/hot.json?limit=12`, {
-      headers: { accept: "application/json" },
+      headers: { accept: "application/json", "user-agent": userAgent },
     });
     for (const child of data.data?.children || []) {
       const post = child.data;
@@ -503,24 +643,75 @@ async function crawlReddit() {
   return results;
 }
 
-function parseRss(xml, source) {
+function parseRss(xml, source, platform = "Google News") {
   const items = [];
   const itemMatches = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
-  for (const item of itemMatches.slice(0, 25)) {
+  for (const [index, item] of itemMatches.slice(0, 25).entries()) {
     const pick = (tag) => stripHtml((item.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`)) || [])[1] || "");
     items.push({
-      platform: "Google News",
+      platform,
       source,
       title: pick("title"),
       desc: pick("description"),
       url: pick("link"),
       author: source,
       publishedAt: pick("pubDate") || nowIso(),
-      score: 80,
-      comments: 12,
+      score: platform === "微博" ? Math.max(100, 520 - index * 14) : 80,
+      comments: platform === "微博" ? Math.max(10, 80 - index * 2) : 12,
     });
   }
   return items;
+}
+
+async function crawlWeibo() {
+  const mode = (settings.sourceConfig?.weibo?.mode || process.env.WEIBO_MODE || "auto").toLowerCase();
+  if (mode === "direct") return crawlWeiboDirect();
+  if (mode === "rsshub") return crawlWeiboRssHub();
+  try {
+    return await crawlWeiboRssHub();
+  } catch {
+    return crawlWeiboDirect();
+  }
+}
+
+async function crawlWeiboRssHub() {
+  const baseUrl = (settings.sourceConfig?.weibo?.rsshubBaseUrl || process.env.RSSHUB_BASE_URL || "https://rsshub.app").replace(/\/$/, "");
+  const url = settings.sourceConfig?.weibo?.rssUrl || process.env.WEIBO_RSS_URL || `${baseUrl}/weibo/search/hot`;
+  const xml = await fetchText(url);
+  return parseRss(xml, "Weibo Hot Search", "微博").map((item) => ({
+    ...item,
+    region: "中国",
+  }));
+}
+
+async function crawlWeiboDirect() {
+  const data = await fetchJson("https://weibo.com/ajax/side/hotSearch", {
+    headers: {
+      accept: "application/json,text/plain,*/*",
+      referer: "https://weibo.com/hot/search",
+      "user-agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+    },
+  });
+  return (data.data?.realtime || [])
+    .filter((item) => item.word && !item.is_ad)
+    .slice(0, 40)
+    .map((item, index) => {
+      const title = stripHtml(item.note || item.word);
+      const rank = Number(item.realpos || index + 1);
+      const rawHeat = Number(item.num || 100);
+      return {
+        platform: "微博",
+        source: "Weibo Hot Search",
+        title,
+        desc: `${item.label_name || "热搜"} · 排名 ${rank} · 热度 ${item.num || "-"}`,
+        url: `https://s.weibo.com/weibo?q=${encodeURIComponent(item.word_scheme || `#${item.word}#`)}`,
+        author: "微博热搜",
+        publishedAt: new Date(Date.now() - Math.max(0, rank - 1) * 12 * 60 * 1000).toISOString(),
+        score: Math.max(8, Math.round(Math.log10(Math.max(rawHeat, 10)) * 12)),
+        comments: Math.max(10, 80 - index),
+      };
+    });
 }
 
 async function crawlGoogleNews() {
@@ -550,6 +741,8 @@ async function runRefresh({ manual = false } = {}) {
   memory.jobs = memory.jobs.slice(0, 80);
 
   const sourceTasks = [
+    ["twitter", "X Recent Search", crawlTwitter],
+    ["weibo", "Weibo Hot Search", crawlWeibo],
     ["hackerNews", "Hacker News", crawlHackerNews],
     ["arxiv", "arXiv", crawlArxiv],
     ["googleNews", "Google News RSS", crawlGoogleNews],
@@ -584,10 +777,11 @@ async function runRefresh({ manual = false } = {}) {
     .map((topic) => {
       const old = oldTopics.get(topic.id);
       if (old) {
+        const heat = Math.max(topic.heat, old.heat * 0.92);
         return {
           ...topic,
           firstSeenAt: old.firstSeenAt || topic.crawledAt,
-          heat: Math.max(topic.heat, old.heat * 0.92),
+          heat: Number(heat.toFixed(1)),
         };
       }
       return { ...topic, firstSeenAt: topic.crawledAt };
@@ -621,7 +815,7 @@ function filteredTopics(query) {
   return memory.topics.filter((topic) => {
     const platformOk = platform === "全部" || topic.platform === platform;
     const categoryOk = category === "全部" || topic.category === category;
-    const regionOk = region === "全球" || topic.region === region || topic.region === "全球";
+    const regionOk = region === "全球" || topic.region === region;
     const keywordOk = !keyword || `${topic.title} ${topic.desc} ${topic.keywords.join(" ")}`.toLowerCase().includes(keyword);
     return platformOk && categoryOk && regionOk && keywordOk;
   });
@@ -743,7 +937,21 @@ async function handleApi(req, res) {
   }
   if (req.method === "POST" && url.pathname === "/api/settings") {
     const body = await readBody(req);
-    settings = { ...settings, ...body, sources: { ...settings.sources, ...(body.sources || {}) }, telegram: { ...settings.telegram, ...(body.telegram || {}) } };
+    settings = {
+      ...settings,
+      ...body,
+      sources: { ...settings.sources, ...(body.sources || {}) },
+      sourceConfig: {
+        ...settings.sourceConfig,
+        ...(body.sourceConfig || {}),
+        twitter: { ...settings.sourceConfig.twitter, ...(body.sourceConfig?.twitter || {}) },
+        weibo: { ...settings.sourceConfig.weibo, ...(body.sourceConfig?.weibo || {}) },
+        github: { ...settings.sourceConfig.github, ...(body.sourceConfig?.github || {}) },
+        reddit: { ...settings.sourceConfig.reddit, ...(body.sourceConfig?.reddit || {}) },
+      },
+      telegram: { ...settings.telegram, ...(body.telegram || {}) },
+      feishu: { ...settings.feishu, ...(body.feishu || {}) },
+    };
     persist();
     scheduleAutoRefresh();
     return json(res, { ok: true, settings });
@@ -763,29 +971,67 @@ async function handleApi(req, res) {
     const topic = memory.topics.find((item) => item.id === body.topicId) || memory.topics[0];
     if (!topic) return json(res, { error: "暂无热点，请先刷新抓取" }, 400);
     const mode = body.mode || "快讯版";
+    const asset = assets.find((item) => item.id === body.assetId);
+    const baseText = topic.publishCopy[mode] || makeCopies(topic).快讯版;
     memory.stats.generated += 1;
     persist();
-    return json(res, { topic, mode, text: topic.publishCopy[mode] || makeCopies(topic).快讯版 });
+    return json(res, { topic, mode, asset, text: applyAssetContext(baseText, asset) });
   }
   if (req.method === "GET" && url.pathname === "/api/push/log") {
-    return json(res, { pushLog, telegramEnabled: Boolean(settings.telegram.enabled && settings.telegram.botToken && settings.telegram.chatId) });
+    return json(res, {
+      pushLog,
+      channels: {
+        local: true,
+        telegram: Boolean(settings.telegram.enabled && settings.telegram.botToken && settings.telegram.chatId),
+        feishu: Boolean(settings.feishu.enabled && settings.feishu.webhookUrl),
+      },
+    });
   }
   if (req.method === "POST" && url.pathname === "/api/push/send") {
     const body = await readBody(req);
     const text = body.text || "";
-    const entry = { id: idFor(`${Date.now()}:${text}`), text, createdAt: nowIso(), status: "simulated", target: "local" };
-    if (settings.telegram.enabled && settings.telegram.botToken && settings.telegram.chatId) {
-      try {
-        const result = await fetchJson(`https://api.telegram.org/bot${settings.telegram.botToken}/sendMessage`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ chat_id: settings.telegram.chatId, text }),
-        });
-        entry.status = result.ok ? "sent" : "failed";
-        entry.target = "telegram";
-      } catch (error) {
+    const target = body.target || "local";
+    const entry = { id: idFor(`${Date.now()}:${target}:${text}`), text, createdAt: nowIso(), status: "simulated", target };
+    if (target === "telegram") {
+      if (!(settings.telegram.enabled && settings.telegram.botToken && settings.telegram.chatId)) {
         entry.status = "failed";
-        entry.error = error.message;
+        entry.error = "Telegram is not configured";
+      } else {
+        try {
+          const result = await fetchJson(`https://api.telegram.org/bot${settings.telegram.botToken}/sendMessage`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ chat_id: settings.telegram.chatId, text }),
+          });
+          entry.status = result.ok ? "sent" : "failed";
+        } catch (error) {
+          entry.status = "failed";
+          entry.error = error.message;
+        }
+      }
+    } else if (target === "feishu") {
+      if (!(settings.feishu.enabled && settings.feishu.webhookUrl)) {
+        entry.status = "failed";
+        entry.error = "Feishu webhook is not configured";
+      } else {
+        try {
+          const timestamp = Math.floor(Date.now() / 1000).toString();
+          const body = {
+            msg_type: "text",
+            content: { text },
+            ...(settings.feishu.secret ? { timestamp, sign: feishuSignature(timestamp, settings.feishu.secret) } : {}),
+          };
+          const result = await fetchJson(settings.feishu.webhookUrl, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          entry.status = result.StatusCode === 0 || result.code === 0 ? "sent" : "failed";
+          if (entry.status === "failed") entry.error = result.msg || result.StatusMessage || "Feishu webhook returned an error";
+        } catch (error) {
+          entry.status = "failed";
+          entry.error = error.message;
+        }
       }
     }
     pushLog.unshift(entry);

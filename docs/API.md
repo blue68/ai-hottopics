@@ -71,9 +71,29 @@ Settings include:
 - `refreshIntervalMinutes`
 - `heatThreshold`
 - `sources`
+- `sourceConfig`
 - `keywords`
 - `blockedWords`
 - `telegram`
+- `feishu`
+
+`sources` can include:
+
+- `twitter`
+- `weibo`
+- `hackerNews`
+- `arxiv`
+- `googleNews`
+- `github`
+- `reddit`
+- `coingecko`
+
+`sourceConfig` can include crawler parameters for configurable sources:
+
+- `twitter`: `bearerToken`, `query`, `lang`, `maxResults`, `queryMaxChars`
+- `weibo`: `mode`, `rsshubBaseUrl`, `rssUrl`
+- `github`: `token`
+- `reddit`: `userAgent`
 
 ## Assets
 
@@ -106,7 +126,8 @@ POST body:
 ```json
 {
   "topicId": "topic-id",
-  "mode": "快讯版"
+  "mode": "快讯版",
+  "assetId": "optional-asset-id"
 }
 ```
 
@@ -129,8 +150,15 @@ POST body:
 
 ```json
 {
-  "text": "message"
+  "text": "message",
+  "target": "local"
 }
 ```
 
-If Telegram is configured, the API sends a real Telegram message. Otherwise it records a simulated push locally.
+Supported `target` values:
+
+- `local`
+- `telegram`
+- `feishu`
+
+`local` records a simulated push. `telegram` and `feishu` send real messages when their settings are configured.

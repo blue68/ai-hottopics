@@ -6,7 +6,7 @@ AI HotTopics 是一个开源热点追踪系统，用于抓取公开数据源、�
 
 ## 功能
 
-- 多源抓取：Hacker News、GitHub Search、arXiv，另有 Google News RSS、Reddit、CoinGecko 的容错接入
+- 多源抓取：X/Twitter、微博热搜、Hacker News、GitHub Search、arXiv，另有 Google News RSS、Reddit、CoinGecko 的容错接入
 - 热点排序：按发布时间、互动量、来源权重、关键词信号计算热度
 - 关键词雷达：聚合关键词、关联话题、平均热度和风险
 - 内容工厂：生成快讯版、锐评版、Thread、Meme、带节奏版文案
@@ -47,11 +47,26 @@ npm start
 - `DATA_DIR`：本地数据目录，默认 `./data`
 - `AUTO_REFRESH`：是否启动后定时刷新，默认 `true`
 - `INITIAL_REFRESH`：启动时无数据是否自动抓取，默认 `true`
+- `TWITTER_ENABLED`：是否启用 X/Twitter Recent Search
+- `X_BEARER_TOKEN`：X API Bearer Token，启用 Twitter 源时必填
+- `X_SEARCH_QUERY`：可选，直接指定 X Recent Search 查询；为空时使用 `TRACK_KEYWORDS` 组合
+- `X_SEARCH_LANG`：可选，按语言过滤 X 结果，例如 `en` 或 `zh`
+- `X_SEARCH_MAX_RESULTS`：X 单次抓取数量，范围 `10` 到 `100`，默认 `50`
+- `X_SEARCH_QUERY_MAX_CHARS`：X 查询长度保护，默认 `512`，最高 `4096`
+- `WEIBO_ENABLED`：是否启用微博热搜 RSS 源
+- `WEIBO_MODE`：微博源模式，`auto`、`rsshub` 或 `direct`
+- `RSSHUB_BASE_URL`：RSSHub 实例地址，默认 `https://rsshub.app`
+- `WEIBO_RSS_URL`：自定义微博 RSS 地址，设置后优先于 `RSSHUB_BASE_URL`
+- `GITHUB_TOKEN`：可选，GitHub Search API token，用于提升限流额度
+- `REDDIT_USER_AGENT`：可选，Reddit JSON 请求的 User-Agent
 - `TELEGRAM_ENABLED`：是否启用 Telegram 真实推送
 - `TELEGRAM_BOT_TOKEN`：Telegram Bot Token
 - `TELEGRAM_CHAT_ID`：Telegram Chat ID
+- `FEISHU_ENABLED`：是否启用飞书机器人推送
+- `FEISHU_WEBHOOK_URL`：飞书自定义机器人 Webhook
+- `FEISHU_SECRET`：飞书机器人签名密钥，可选
 
-UI 设置中心里的配置会写入 `data/settings.json`。环境变量用于初始化默认值和无 UI 部署场景。
+UI 设置中心里的配置会写入 `data/settings.json`。环境变量用于初始化默认值和无 UI 部署场景。勾选 X、微博、GitHub、Reddit 等需要参数的数据源时，设置中心会自动展开对应抓取参数表单。飞书机器人可在推送中心配置。
 
 ## 项目结构
 
