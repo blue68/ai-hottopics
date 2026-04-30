@@ -72,6 +72,34 @@ GITHUB_TOKEN=github_pat_xxx
 REDDIT_USER_AGENT=ai-hottopics/0.1 (+local research dashboard)
 ```
 
+TikTok and Instagram via public RSS/RSSHub routes:
+
+```bash
+TIKTOK_ENABLED=true
+TIKTOK_RSS_URL=https://your-rsshub.example.com/tiktok/user/:id
+TIKTOK_SOURCE_NAME=TikTok RSS
+INSTAGRAM_ENABLED=true
+INSTAGRAM_RSS_URL=https://your-rsshub.example.com/instagram/user/:id
+INSTAGRAM_SOURCE_NAME=Instagram RSS
+```
+
+AI, Crypto, and life/knowledge sources:
+
+```bash
+HUGGINGFACE_ENABLED=true
+OPENAI_BLOG_ENABLED=true
+DEEPMIND_ENABLED=true
+ANTHROPIC_ENABLED=true
+GLASSNODE_ENABLED=true
+GLASSNODE_API_KEY=your_glassnode_key
+COINMARKETCAP_ENABLED=true
+COINMARKETCAP_API_KEY=your_coinmarketcap_key
+WIKIPEDIA_ENABLED=true
+WIKIPEDIA_LANGUAGE=zh
+YOUTUBE_ENABLED=true
+YOUTUBE_RSS_URL=https://www.youtube.com/feeds/videos.xml?channel_id=CHANNEL_ID
+```
+
 ## Docker Notes
 
 There is no Dockerfile yet. If you add one, persist `DATA_DIR` as a volume and run:

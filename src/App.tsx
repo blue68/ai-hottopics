@@ -86,6 +86,16 @@ type SettingsModel = {
     weibo: { mode: string; rsshubBaseUrl: string; rssUrl: string };
     github: { token: string };
     reddit: { userAgent: string };
+    tiktok: { rssUrl: string; sourceName: string };
+    instagram: { rssUrl: string; sourceName: string };
+    huggingFace: { rssUrl: string; sourceName: string };
+    openaiBlog: { rssUrl: string; sourceName: string };
+    deepmind: { rssUrl: string; sourceName: string };
+    anthropic: { rssUrl: string; sourceName: string };
+    glassnode: { apiKey: string; asset: string; metric: string; interval: string };
+    coinMarketCap: { apiKey: string; endpoint: string };
+    wikipedia: { language: string; sourceName: string };
+    youtube: { rssUrl: string; sourceName: string };
   };
   keywords: string[];
   blockedWords: string[];
@@ -117,8 +127,33 @@ const sourcePlatformLabels: Record<string, string> = {
   github: "GitHub",
   reddit: "Reddit",
   coingecko: "CoinGecko",
+  tiktok: "TikTok",
+  instagram: "Instagram",
+  huggingFace: "Hugging Face",
+  openaiBlog: "OpenAI 官方博客",
+  deepmind: "Google DeepMind",
+  anthropic: "Anthropic",
+  glassnode: "Glassnode",
+  coinMarketCap: "CoinMarketCap",
+  wikipedia: "Wikipedia",
+  youtube: "YouTube",
 };
-const configurableSources = new Set(["twitter", "weibo", "github", "reddit"]);
+const configurableSources = new Set([
+  "twitter",
+  "weibo",
+  "github",
+  "reddit",
+  "tiktok",
+  "instagram",
+  "huggingFace",
+  "openaiBlog",
+  "deepmind",
+  "anthropic",
+  "glassnode",
+  "coinMarketCap",
+  "wikipedia",
+  "youtube",
+]);
 const pushChannelLabels: Record<PushChannel, string> = {
   local: "本地记录（仅日志）",
   telegram: "Telegram",
@@ -300,6 +335,7 @@ function Header({
   refresh,
   refreshing,
   lastRefreshAt,
+  alertCount,
   openTasks,
   openHelp,
 }: {
@@ -308,9 +344,11 @@ function Header({
   refresh: () => void;
   refreshing: boolean;
   lastRefreshAt: string | null;
+  alertCount: number;
   openTasks: () => void;
   openHelp: () => void;
 }) {
+  const badgeLabel = alertCount > 99 ? "99+" : String(alertCount);
   return (
     <header className="topbar">
       <label className="searchbox">
@@ -326,8 +364,9 @@ function Header({
         </button>
       </div>
       <div className="top-actions">
-        <button aria-label="通知" className="icon-button has-dot" onClick={openTasks} title="查看任务与告警">
+        <button aria-label={`通知${alertCount ? `，${alertCount} 条告警` : ""}`} className="icon-button" onClick={openTasks} title="查看任务与告警">
           <Bell size={19} />
+          {alertCount > 0 && <span className="notification-badge">{badgeLabel}</span>}
         </button>
         <button aria-label="帮助" className="icon-button" onClick={openHelp} title="查看配置帮助">
           <HelpCircle size={19} />
@@ -1005,6 +1044,38 @@ function AnalyticsPage({ stats, analytics }: { stats: Stats; analytics?: Analyti
   );
 }
 
+function RssSourceConfig({
+  title,
+  source,
+  config,
+  updateSourceConfig,
+}: {
+  title: string;
+  source: keyof Pick<SettingsModel["sourceConfig"], "huggingFace" | "openaiBlog" | "deepmind" | "anthropic" | "youtube">;
+  config: { rssUrl: string; sourceName: string };
+  updateSourceConfig: <K extends keyof SettingsModel["sourceConfig"]>(source: K, patch: Partial<SettingsModel["sourceConfig"][K]>) => void;
+}) {
+  return (
+    <div className="source-config-panel">
+      <b>{title}</b>
+      <label>
+        RSS/RSSHub 路由
+        <input
+          value={config.rssUrl}
+          onChange={(event) => updateSourceConfig(source, { rssUrl: event.target.value } as Partial<SettingsModel["sourceConfig"][typeof source]>)}
+        />
+      </label>
+      <label>
+        来源名称
+        <input
+          value={config.sourceName}
+          onChange={(event) => updateSourceConfig(source, { sourceName: event.target.value } as Partial<SettingsModel["sourceConfig"][typeof source]>)}
+        />
+      </label>
+    </div>
+  );
+}
+
 function SettingsPage({ settings, setSettings, save }: { settings?: SettingsModel; setSettings: (value: SettingsModel) => void; save: () => void }) {
   if (!settings) return null;
   const updateSource = (key: string, checked: boolean) => setSettings({ ...settings, sources: { ...settings.sources, [key]: checked } });
@@ -1151,8 +1222,129 @@ function SettingsPage({ settings, setSettings, save }: { settings?: SettingsMode
               </label>
             </div>
           )}
+          {settings.sources.tiktok && (
+            <div className="source-config-panel">
+              <b>TikTok</b>
+              <label>
+                RSS/RSSHub 路由
+                <input
+                  value={settings.sourceConfig.tiktok.rssUrl}
+                  onChange={(event) => updateSourceConfig("tiktok", { rssUrl: event.target.value })}
+                  placeholder="https://your-rsshub.example.com/tiktok/user/:id"
+                />
+              </label>
+              <label>
+                来源名称
+                <input
+                  value={settings.sourceConfig.tiktok.sourceName}
+                  onChange={(event) => updateSourceConfig("tiktok", { sourceName: event.target.value })}
+                  placeholder="TikTok RSS"
+                />
+              </label>
+            </div>
+          )}
+          {settings.sources.instagram && (
+            <div className="source-config-panel">
+              <b>Instagram</b>
+              <label>
+                RSS/RSSHub 路由
+                <input
+                  value={settings.sourceConfig.instagram.rssUrl}
+                  onChange={(event) => updateSourceConfig("instagram", { rssUrl: event.target.value })}
+                  placeholder="https://your-rsshub.example.com/instagram/user/:id"
+                />
+              </label>
+              <label>
+                来源名称
+                <input
+                  value={settings.sourceConfig.instagram.sourceName}
+                  onChange={(event) => updateSourceConfig("instagram", { sourceName: event.target.value })}
+                  placeholder="Instagram RSS"
+                />
+              </label>
+            </div>
+          )}
+          {settings.sources.huggingFace && (
+            <RssSourceConfig title="Hugging Face" source="huggingFace" config={settings.sourceConfig.huggingFace} updateSourceConfig={updateSourceConfig} />
+          )}
+          {settings.sources.openaiBlog && (
+            <RssSourceConfig title="OpenAI 官方博客" source="openaiBlog" config={settings.sourceConfig.openaiBlog} updateSourceConfig={updateSourceConfig} />
+          )}
+          {settings.sources.deepmind && (
+            <RssSourceConfig title="Google DeepMind" source="deepmind" config={settings.sourceConfig.deepmind} updateSourceConfig={updateSourceConfig} />
+          )}
+          {settings.sources.anthropic && (
+            <RssSourceConfig title="Anthropic" source="anthropic" config={settings.sourceConfig.anthropic} updateSourceConfig={updateSourceConfig} />
+          )}
+          {settings.sources.glassnode && (
+            <div className="source-config-panel">
+              <b>Glassnode</b>
+              <label>
+                API Key
+                <input
+                  type="password"
+                  value={settings.sourceConfig.glassnode.apiKey}
+                  onChange={(event) => updateSourceConfig("glassnode", { apiKey: event.target.value })}
+                  placeholder="Glassnode API Key"
+                />
+              </label>
+              <div className="compact-field-grid">
+                <label>
+                  资产
+                  <input value={settings.sourceConfig.glassnode.asset} onChange={(event) => updateSourceConfig("glassnode", { asset: event.target.value })} />
+                </label>
+                <label>
+                  指标
+                  <input value={settings.sourceConfig.glassnode.metric} onChange={(event) => updateSourceConfig("glassnode", { metric: event.target.value })} />
+                </label>
+                <label>
+                  周期
+                  <input value={settings.sourceConfig.glassnode.interval} onChange={(event) => updateSourceConfig("glassnode", { interval: event.target.value })} />
+                </label>
+              </div>
+            </div>
+          )}
+          {settings.sources.coinMarketCap && (
+            <div className="source-config-panel">
+              <b>CoinMarketCap</b>
+              <label>
+                API Key
+                <input
+                  type="password"
+                  value={settings.sourceConfig.coinMarketCap.apiKey}
+                  onChange={(event) => updateSourceConfig("coinMarketCap", { apiKey: event.target.value })}
+                  placeholder="CoinMarketCap Pro API Key"
+                />
+              </label>
+              <label>
+                Endpoint
+                <input
+                  value={settings.sourceConfig.coinMarketCap.endpoint}
+                  onChange={(event) => updateSourceConfig("coinMarketCap", { endpoint: event.target.value })}
+                />
+              </label>
+            </div>
+          )}
+          {settings.sources.wikipedia && (
+            <div className="source-config-panel">
+              <b>Wikipedia</b>
+              <div className="compact-field-grid two-col">
+                <label>
+                  语言
+                  <input value={settings.sourceConfig.wikipedia.language} onChange={(event) => updateSourceConfig("wikipedia", { language: event.target.value })} />
+                </label>
+                <label>
+                  来源名称
+                  <input value={settings.sourceConfig.wikipedia.sourceName} onChange={(event) => updateSourceConfig("wikipedia", { sourceName: event.target.value })} />
+                </label>
+              </div>
+            </div>
+          )}
+          {settings.sources.youtube && (
+            <RssSourceConfig title="YouTube" source="youtube" config={settings.sourceConfig.youtube} updateSourceConfig={updateSourceConfig} />
+          )}
           {!Object.entries(settings.sources).some(([key, enabled]) => enabled && configurableSources.has(key)) && (
-            <p className="settings-hint">勾选 X、微博、GitHub 或 Reddit 后，这里会出现对应抓取参数。</p>
+            <p className="settings-hint">勾选需要参数的数据源后，这里会出现对应抓取参数。</p>
           )}
         </div>
         <div className="settings-block">
@@ -1304,6 +1496,11 @@ export function App() {
     }
     return [...names].filter(Boolean);
   }, [settings?.sources, analytics?.byPlatform, topics]);
+  const notificationCount = useMemo(() => {
+    const latestJob = jobs[0];
+    if (!latestJob) return stats.failedSources || 0;
+    return latestJob.sources.filter((source) => source.status === "failed").length;
+  }, [jobs, stats.failedSources]);
 
   return (
     <div className="app-shell">
@@ -1315,6 +1512,7 @@ export function App() {
           refresh={refresh}
           refreshing={refreshing}
           lastRefreshAt={lastRefreshAt}
+          alertCount={notificationCount}
           openTasks={() => setActiveView("tasks")}
           openHelp={() => setShowHelp((value) => !value)}
         />

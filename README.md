@@ -59,6 +59,13 @@ npm start
 - `WEIBO_RSS_URL`：自定义微博 RSS 地址，设置后优先于 `RSSHUB_BASE_URL`
 - `GITHUB_TOKEN`：可选，GitHub Search API token，用于提升限流额度
 - `REDDIT_USER_AGENT`：可选，Reddit JSON 请求的 User-Agent
+- `TIKTOK_ENABLED` / `TIKTOK_RSS_URL`：可选，启用 TikTok RSS/RSSHub 数据源
+- `INSTAGRAM_ENABLED` / `INSTAGRAM_RSS_URL`：可选，启用 Instagram RSS/RSSHub 数据源
+- `HUGGINGFACE_RSS_URL`、`OPENAI_BLOG_RSS_URL`、`DEEPMIND_RSS_URL`、`ANTHROPIC_RSS_URL`：AI 官方博客类 RSS 数据源
+- `GLASSNODE_API_KEY`：可选，Glassnode API Key
+- `COINMARKETCAP_API_KEY`：可选，CoinMarketCap Pro API Key
+- `WIKIPEDIA_LANGUAGE`：Wikipedia feed 语言，默认 `zh`
+- `YOUTUBE_RSS_URL`：可选，YouTube 频道 RSS 地址
 - `TELEGRAM_ENABLED`：是否启用 Telegram 真实推送
 - `TELEGRAM_BOT_TOKEN`：Telegram Bot Token
 - `TELEGRAM_CHAT_ID`：Telegram Chat ID
@@ -66,7 +73,7 @@ npm start
 - `FEISHU_WEBHOOK_URL`：飞书自定义机器人 Webhook
 - `FEISHU_SECRET`：飞书机器人签名密钥，可选
 
-UI 设置中心里的配置会写入 `data/settings.json`。环境变量用于初始化默认值和无 UI 部署场景。勾选 X、微博、GitHub、Reddit 等需要参数的数据源时，设置中心会自动展开对应抓取参数表单。飞书机器人可在推送中心配置。
+UI 设置中心里的配置会写入 `data/settings.json`。环境变量用于初始化默认值和无 UI 部署场景。勾选 X、微博、GitHub、Reddit、TikTok、Instagram、Glassnode、CoinMarketCap、YouTube 等需要参数的数据源时，设置中心会自动展开对应抓取参数表单。飞书机器人可在推送中心配置。
 
 ## 项目结构
 

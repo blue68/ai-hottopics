@@ -14,6 +14,16 @@ The project only targets public sources and does not bypass authentication or ac
 | Google News RSS | News topic discovery | May fail or be blocked in some networks |
 | Reddit JSON | Community discussion discovery | May fail or be blocked in some networks |
 | CoinGecko Trending | Crypto topic discovery | May be rate-limited |
+| TikTok RSS | Short-video trend discovery | Requires a configured public RSS/RSSHub route |
+| Instagram RSS | Instagram post/reel discovery | Requires a configured public RSS/RSSHub route |
+| Hugging Face Blog RSS | AI model and platform updates | Official/blog RSS route, configurable |
+| OpenAI News RSS | OpenAI product and research updates | Official/news RSS route, configurable |
+| Google DeepMind Blog RSS | DeepMind research and product updates | Official/blog RSS route, configurable |
+| Anthropic News RSS | Anthropic product and research updates | Official/news RSS route, configurable |
+| Glassnode API | Crypto market metrics | Requires `GLASSNODE_API_KEY` |
+| CoinMarketCap API | Crypto trending assets | Requires `COINMARKETCAP_API_KEY` |
+| Wikipedia Featured Feed | Life/knowledge trend discovery | Uses Wikimedia featured feed API |
+| YouTube RSS | Channel/video trend discovery | Requires a configured channel RSS URL |
 
 ## Failure Handling
 
@@ -40,6 +50,15 @@ The UI settings page can store the same source-specific crawler parameters in `d
 - Weibo: mode, RSSHub base URL, custom RSS route
 - GitHub: optional token
 - Reddit: User-Agent
+- TikTok: public RSS/RSSHub route and source name
+- Instagram: public RSS/RSSHub route and source name
+- AI official sources: RSS route and source name
+- Glassnode: API key, asset, metric, interval
+- CoinMarketCap: API key and endpoint
+- Wikipedia: language and source name
+- YouTube: channel RSS route and source name
+
+TikTok and Instagram integrations intentionally use configurable public RSS routes. They do not bypass login, private account access controls, anti-bot protections, or platform restrictions.
 
 For Weibo, `WEIBO_MODE=auto` tries an RSSHub-compatible RSS route first. If RSSHub is unavailable, it falls back to Weibo's public hot-search JSON endpoint without cookies. For production use, prefer a self-hosted RSSHub instance and set:
 

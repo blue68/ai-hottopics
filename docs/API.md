@@ -87,6 +87,16 @@ Settings include:
 - `github`
 - `reddit`
 - `coingecko`
+- `tiktok`
+- `instagram`
+- `huggingFace`
+- `openaiBlog`
+- `deepmind`
+- `anthropic`
+- `glassnode`
+- `coinMarketCap`
+- `wikipedia`
+- `youtube`
 
 `sourceConfig` can include crawler parameters for configurable sources:
 
@@ -94,6 +104,12 @@ Settings include:
 - `weibo`: `mode`, `rsshubBaseUrl`, `rssUrl`
 - `github`: `token`
 - `reddit`: `userAgent`
+- `tiktok`: `rssUrl`, `sourceName`
+- `instagram`: `rssUrl`, `sourceName`
+- `huggingFace`, `openaiBlog`, `deepmind`, `anthropic`, `youtube`: `rssUrl`, `sourceName`
+- `glassnode`: `apiKey`, `asset`, `metric`, `interval`
+- `coinMarketCap`: `apiKey`, `endpoint`
+- `wikipedia`: `language`, `sourceName`
 
 ## Assets
 

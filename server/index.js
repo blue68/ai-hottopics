@@ -35,6 +35,16 @@ const defaultSettings = {
     github: true,
     reddit: true,
     coingecko: true,
+    tiktok: parseBool(process.env.TIKTOK_ENABLED, Boolean(process.env.TIKTOK_RSS_URL)),
+    instagram: parseBool(process.env.INSTAGRAM_ENABLED, Boolean(process.env.INSTAGRAM_RSS_URL)),
+    huggingFace: parseBool(process.env.HUGGINGFACE_ENABLED, true),
+    openaiBlog: parseBool(process.env.OPENAI_BLOG_ENABLED, true),
+    deepmind: parseBool(process.env.DEEPMIND_ENABLED, true),
+    anthropic: parseBool(process.env.ANTHROPIC_ENABLED, true),
+    glassnode: parseBool(process.env.GLASSNODE_ENABLED, Boolean(process.env.GLASSNODE_API_KEY)),
+    coinMarketCap: parseBool(process.env.COINMARKETCAP_ENABLED, Boolean(process.env.COINMARKETCAP_API_KEY)),
+    wikipedia: parseBool(process.env.WIKIPEDIA_ENABLED, true),
+    youtube: parseBool(process.env.YOUTUBE_ENABLED, Boolean(process.env.YOUTUBE_RSS_URL)),
   },
   sourceConfig: {
     twitter: {
@@ -54,6 +64,48 @@ const defaultSettings = {
     },
     reddit: {
       userAgent: process.env.REDDIT_USER_AGENT || "ai-hottopics/0.1 (+local research dashboard)",
+    },
+    tiktok: {
+      rssUrl: process.env.TIKTOK_RSS_URL || "",
+      sourceName: process.env.TIKTOK_SOURCE_NAME || "TikTok RSS",
+    },
+    instagram: {
+      rssUrl: process.env.INSTAGRAM_RSS_URL || "",
+      sourceName: process.env.INSTAGRAM_SOURCE_NAME || "Instagram RSS",
+    },
+    huggingFace: {
+      rssUrl: process.env.HUGGINGFACE_RSS_URL || "https://huggingface.co/blog/feed.xml",
+      sourceName: process.env.HUGGINGFACE_SOURCE_NAME || "Hugging Face Blog",
+    },
+    openaiBlog: {
+      rssUrl: process.env.OPENAI_BLOG_RSS_URL || "https://openai.com/news/rss.xml",
+      sourceName: process.env.OPENAI_BLOG_SOURCE_NAME || "OpenAI News",
+    },
+    deepmind: {
+      rssUrl: process.env.DEEPMIND_RSS_URL || "https://deepmind.google/blog/rss.xml",
+      sourceName: process.env.DEEPMIND_SOURCE_NAME || "Google DeepMind Blog",
+    },
+    anthropic: {
+      rssUrl: process.env.ANTHROPIC_RSS_URL || "https://www.anthropic.com/news/rss.xml",
+      sourceName: process.env.ANTHROPIC_SOURCE_NAME || "Anthropic News",
+    },
+    glassnode: {
+      apiKey: process.env.GLASSNODE_API_KEY || "",
+      asset: process.env.GLASSNODE_ASSET || "BTC",
+      metric: process.env.GLASSNODE_METRIC || "market/price_usd_close",
+      interval: process.env.GLASSNODE_INTERVAL || "24h",
+    },
+    coinMarketCap: {
+      apiKey: process.env.COINMARKETCAP_API_KEY || "",
+      endpoint: process.env.COINMARKETCAP_ENDPOINT || "https://pro-api.coinmarketcap.com/v1/cryptocurrency/trending/latest",
+    },
+    wikipedia: {
+      language: process.env.WIKIPEDIA_LANGUAGE || "zh",
+      sourceName: process.env.WIKIPEDIA_SOURCE_NAME || "Wikipedia Featured",
+    },
+    youtube: {
+      rssUrl: process.env.YOUTUBE_RSS_URL || "",
+      sourceName: process.env.YOUTUBE_SOURCE_NAME || "YouTube RSS",
     },
   },
   keywords: csv(process.env.TRACK_KEYWORDS, ["AI", "OpenAI", "Bitcoin", "crypto", "芯片", "电动车", "地缘政治", "robot", "agent"]),
@@ -112,6 +164,16 @@ settings = {
     weibo: { ...defaultSettings.sourceConfig.weibo, ...(settings.sourceConfig?.weibo || {}) },
     github: { ...defaultSettings.sourceConfig.github, ...(settings.sourceConfig?.github || {}) },
     reddit: { ...defaultSettings.sourceConfig.reddit, ...(settings.sourceConfig?.reddit || {}) },
+    tiktok: { ...defaultSettings.sourceConfig.tiktok, ...(settings.sourceConfig?.tiktok || {}) },
+    instagram: { ...defaultSettings.sourceConfig.instagram, ...(settings.sourceConfig?.instagram || {}) },
+    huggingFace: { ...defaultSettings.sourceConfig.huggingFace, ...(settings.sourceConfig?.huggingFace || {}) },
+    openaiBlog: { ...defaultSettings.sourceConfig.openaiBlog, ...(settings.sourceConfig?.openaiBlog || {}) },
+    deepmind: { ...defaultSettings.sourceConfig.deepmind, ...(settings.sourceConfig?.deepmind || {}) },
+    anthropic: { ...defaultSettings.sourceConfig.anthropic, ...(settings.sourceConfig?.anthropic || {}) },
+    glassnode: { ...defaultSettings.sourceConfig.glassnode, ...(settings.sourceConfig?.glassnode || {}) },
+    coinMarketCap: { ...defaultSettings.sourceConfig.coinMarketCap, ...(settings.sourceConfig?.coinMarketCap || {}) },
+    wikipedia: { ...defaultSettings.sourceConfig.wikipedia, ...(settings.sourceConfig?.wikipedia || {}) },
+    youtube: { ...defaultSettings.sourceConfig.youtube, ...(settings.sourceConfig?.youtube || {}) },
   },
   telegram: { ...defaultSettings.telegram, ...(settings.telegram || {}) },
   feishu: { ...defaultSettings.feishu, ...(settings.feishu || {}) },
@@ -218,7 +280,7 @@ function minutesAgo(dateValue) {
 function categoryFor(text) {
   const lower = text.toLowerCase();
   if (/bitcoin|btc|crypto|ethereum|solana|token|coin|defi|链|比特币|加密|币圈|web3/.test(lower)) return "Crypto";
-  if (/ai|openai|model|agent|robot|llm|sora|芯片|英伟达|大模型|人工智能|机器人/.test(lower)) return "AI";
+  if (/ai|openai|anthropic|deepmind|hugging face|huggingface|model|agent|robot|llm|sora|芯片|英伟达|大模型|人工智能|机器人/.test(lower)) return "AI";
   if (/war|israel|iran|russia|ukraine|tariff|election|protest|中东|以色列|伊朗|政治|选举|示威|关税/.test(lower)) return "地缘政治";
   if (/meme|funny|viral|joke|梗|整活|笑|热搜|爆了|塌房/.test(lower)) return "整活/Meme";
   if (/health|life|food|travel|生活|健康|旅游|教育|明星|电影|综艺|直播/.test(lower)) return "生活百科";
@@ -292,20 +354,22 @@ function extractKeywords(text) {
 function heatScore(raw) {
   const recency = Math.max(0, 42 - Math.sqrt(minutesAgo(raw.publishedAt || Date.now())) * 2.6);
   const engagement = Math.log10((raw.score || 0) + (raw.comments || 0) * 2 + 10) * 19;
-  const sourceWeight =
+    const sourceWeight =
     raw.platform === "X"
       ? 20
       : raw.platform === "微博"
         ? 20
-        : raw.platform === "GitHub"
-          ? 16
-          : raw.platform === "CoinGecko"
-            ? 18
-            : raw.platform === "Hacker News"
+        : raw.platform === "TikTok" || raw.platform === "Instagram"
+          ? 19
+          : raw.platform === "GitHub"
+            ? 16
+            : raw.platform === "CoinGecko"
               ? 18
-              : raw.platform === "arXiv"
-                ? 15
-                : 10;
+              : raw.platform === "Hacker News"
+                ? 18
+                : raw.platform === "arXiv"
+                  ? 15
+                  : 10;
   return Math.max(30, Math.min(99.8, recency + engagement + sourceWeight));
 }
 
@@ -656,11 +720,95 @@ function parseRss(xml, source, platform = "Google News") {
       url: pick("link"),
       author: source,
       publishedAt: pick("pubDate") || nowIso(),
-      score: platform === "微博" ? Math.max(100, 520 - index * 14) : 80,
-      comments: platform === "微博" ? Math.max(10, 80 - index * 2) : 12,
+      score: platform === "微博" ? Math.max(100, 520 - index * 14) : platform === "TikTok" || platform === "Instagram" ? Math.max(90, 260 - index * 8) : 80,
+      comments: platform === "微博" ? Math.max(10, 80 - index * 2) : platform === "TikTok" || platform === "Instagram" ? Math.max(8, 45 - index) : 12,
     });
   }
   return items;
+}
+
+async function crawlConfiguredRss(sourceKey, platform, fallbackSourceName) {
+  const config = settings.sourceConfig?.[sourceKey] || {};
+  const url = config.rssUrl || process.env[`${sourceKey.toUpperCase()}_RSS_URL`] || "";
+  if (!url) throw new Error(`${sourceKey.toUpperCase()}_RSS_URL is not configured`);
+  const xml = await fetchText(url);
+  const source = config.sourceName || fallbackSourceName;
+  return parseRss(xml, source, platform);
+}
+
+async function crawlWikipedia() {
+  const config = settings.sourceConfig?.wikipedia || {};
+  const language = (config.language || "zh").trim() || "zh";
+  const date = new Date();
+  const yyyy = date.getUTCFullYear();
+  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(date.getUTCDate()).padStart(2, "0");
+  const data = await fetchJson(`https://api.wikimedia.org/feed/v1/wikipedia/${encodeURIComponent(language)}/featured/${yyyy}/${mm}/${dd}`);
+  const source = config.sourceName || "Wikipedia Featured";
+  const mostread = data.mostread?.articles || [];
+  return mostread.slice(0, 25).map((item, index) => ({
+    platform: "Wikipedia",
+    source,
+    title: item.normalizedtitle || item.title,
+    desc: item.description || item.extract || "",
+    url: item.content_urls?.desktop?.page || item.content_urls?.mobile?.page || "",
+    author: source,
+    publishedAt: nowIso(),
+    score: Math.max(80, 320 - index * 8),
+    comments: Math.max(6, 35 - index),
+  }));
+}
+
+async function crawlGlassnode() {
+  const config = settings.sourceConfig?.glassnode || {};
+  const apiKey = config.apiKey || process.env.GLASSNODE_API_KEY || "";
+  if (!apiKey) throw new Error("GLASSNODE_API_KEY is not configured");
+  const asset = config.asset || "BTC";
+  const metric = (config.metric || "market/price_usd_close").replace(/^\/+/, "");
+  const interval = config.interval || "24h";
+  const params = new URLSearchParams({ a: asset, i: interval, api_key: apiKey });
+  const rows = await fetchJson(`https://api.glassnode.com/v1/metrics/${metric}?${params}`);
+  const latest = Array.isArray(rows) ? rows.at(-1) : null;
+  if (!latest) return [];
+  const previous = Array.isArray(rows) && rows.length > 1 ? rows.at(-2) : null;
+  const latestValue = Number(latest.v || 0);
+  const previousValue = Number(previous?.v || latestValue || 0);
+  const change = previousValue ? ((latestValue - previousValue) / previousValue) * 100 : 0;
+  return [{
+    platform: "Glassnode",
+    source: `Glassnode ${metric}`,
+    title: `${asset} ${metric} ${change >= 0 ? "上涨" : "下跌"} ${Math.abs(change).toFixed(2)}%`,
+    desc: `Latest value ${latestValue.toFixed(2)} from Glassnode metric ${metric}`,
+    url: "https://studio.glassnode.com/",
+    author: "Glassnode",
+    publishedAt: latest.t ? new Date(latest.t * 1000).toISOString() : nowIso(),
+    score: Math.max(80, Math.round(Math.abs(change) * 80 + 120)),
+    comments: Math.max(8, Math.round(Math.abs(change) * 10)),
+  }];
+}
+
+async function crawlCoinMarketCap() {
+  const config = settings.sourceConfig?.coinMarketCap || {};
+  const apiKey = config.apiKey || process.env.COINMARKETCAP_API_KEY || "";
+  if (!apiKey) throw new Error("COINMARKETCAP_API_KEY is not configured");
+  const endpoint = config.endpoint || "https://pro-api.coinmarketcap.com/v1/cryptocurrency/trending/latest";
+  const data = await fetchJson(endpoint, { headers: { "X-CMC_PRO_API_KEY": apiKey } });
+  const rows = Array.isArray(data.data) ? data.data : [];
+  return rows.slice(0, 25).map((coin, index) => {
+    const quote = coin.quote?.USD || {};
+    const change = Number(quote.percent_change_24h || 0);
+    return {
+      platform: "CoinMarketCap",
+      source: "CoinMarketCap Trending",
+      title: `${coin.name || coin.symbol} (${coin.symbol || "-"}) ${change >= 0 ? "上涨" : "下跌"} ${Math.abs(change).toFixed(2)}%`,
+      desc: `Rank ${coin.cmc_rank || "-"}, price ${quote.price ? `$${Number(quote.price).toFixed(4)}` : "-"}`,
+      url: coin.slug ? `https://coinmarketcap.com/currencies/${coin.slug}/` : "https://coinmarketcap.com/trending-cryptocurrencies/",
+      author: coin.symbol || "CMC",
+      publishedAt: coin.last_updated || nowIso(),
+      score: Math.max(80, Math.round(Math.abs(change) * 60 + 260 - index * 6)),
+      comments: Math.max(8, 50 - index),
+    };
+  });
 }
 
 async function crawlWeibo() {
@@ -749,6 +897,16 @@ async function runRefresh({ manual = false } = {}) {
     ["github", "GitHub Search", crawlGithub],
     ["reddit", "Reddit", crawlReddit],
     ["coingecko", "CoinGecko", crawlCoinGecko],
+    ["tiktok", "TikTok RSS", () => crawlConfiguredRss("tiktok", "TikTok", "TikTok RSS")],
+    ["instagram", "Instagram RSS", () => crawlConfiguredRss("instagram", "Instagram", "Instagram RSS")],
+    ["huggingFace", "Hugging Face Blog", () => crawlConfiguredRss("huggingFace", "Hugging Face", "Hugging Face Blog")],
+    ["openaiBlog", "OpenAI News", () => crawlConfiguredRss("openaiBlog", "OpenAI", "OpenAI News")],
+    ["deepmind", "Google DeepMind Blog", () => crawlConfiguredRss("deepmind", "Google DeepMind", "Google DeepMind Blog")],
+    ["anthropic", "Anthropic News", () => crawlConfiguredRss("anthropic", "Anthropic", "Anthropic News")],
+    ["glassnode", "Glassnode", crawlGlassnode],
+    ["coinMarketCap", "CoinMarketCap", crawlCoinMarketCap],
+    ["wikipedia", "Wikipedia", crawlWikipedia],
+    ["youtube", "YouTube RSS", () => crawlConfiguredRss("youtube", "YouTube", "YouTube RSS")],
   ].filter(([key]) => settings.sources[key]);
 
   const raw = [];
@@ -948,6 +1106,16 @@ async function handleApi(req, res) {
         weibo: { ...settings.sourceConfig.weibo, ...(body.sourceConfig?.weibo || {}) },
         github: { ...settings.sourceConfig.github, ...(body.sourceConfig?.github || {}) },
         reddit: { ...settings.sourceConfig.reddit, ...(body.sourceConfig?.reddit || {}) },
+        tiktok: { ...settings.sourceConfig.tiktok, ...(body.sourceConfig?.tiktok || {}) },
+        instagram: { ...settings.sourceConfig.instagram, ...(body.sourceConfig?.instagram || {}) },
+        huggingFace: { ...settings.sourceConfig.huggingFace, ...(body.sourceConfig?.huggingFace || {}) },
+        openaiBlog: { ...settings.sourceConfig.openaiBlog, ...(body.sourceConfig?.openaiBlog || {}) },
+        deepmind: { ...settings.sourceConfig.deepmind, ...(body.sourceConfig?.deepmind || {}) },
+        anthropic: { ...settings.sourceConfig.anthropic, ...(body.sourceConfig?.anthropic || {}) },
+        glassnode: { ...settings.sourceConfig.glassnode, ...(body.sourceConfig?.glassnode || {}) },
+        coinMarketCap: { ...settings.sourceConfig.coinMarketCap, ...(body.sourceConfig?.coinMarketCap || {}) },
+        wikipedia: { ...settings.sourceConfig.wikipedia, ...(body.sourceConfig?.wikipedia || {}) },
+        youtube: { ...settings.sourceConfig.youtube, ...(body.sourceConfig?.youtube || {}) },
       },
       telegram: { ...settings.telegram, ...(body.telegram || {}) },
       feishu: { ...settings.feishu, ...(body.feishu || {}) },

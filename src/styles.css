@@ -371,14 +371,14 @@ button {
   border-radius: 8px;
 }
 
-.has-dot::after {
-  content: "12";
+.notification-badge {
   position: absolute;
   top: -7px;
   right: -7px;
   display: grid;
-  width: 22px;
+  min-width: 22px;
   height: 22px;
+  padding: 0 5px;
   place-items: center;
   border-radius: 50%;
   background: #e6173e;
@@ -1718,6 +1718,10 @@ select,
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 10px;
+}
+
+.compact-field-grid.two-col {
+  grid-template-columns: repeat(2, 1fr);
 }
 
 .settings-hint {

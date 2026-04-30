@@ -7,6 +7,8 @@
 - Connected account assets to the content factory so saved personas/templates can be applied to generated copy.
 - Added channel-aware push flows for local records, Telegram, and Feishu bot webhooks.
 - Added Feishu bot configuration, content copy actions, push-channel selection, and working header notification/help actions.
+- Added configurable TikTok and Instagram RSS/RSSHub data sources.
+- Added AI, Crypto, and lifestyle source integrations for Hugging Face, OpenAI Blog, Google DeepMind, Anthropic, Glassnode, CoinMarketCap, Wikipedia, and YouTube.
 
 ## 0.1.0
 
