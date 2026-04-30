@@ -1056,7 +1056,7 @@ server.listen(port, async () => {
   console.log(`AI hot topics API listening on http://localhost:${port}`);
   console.log(`Data directory: ${dataDir}`);
   scheduleAutoRefresh();
-  if (initialRefresh && !memory.topics.length) {
+  if (initialRefresh) {
     runRefresh({ manual: false }).catch((error) => console.error("initial refresh failed", error));
   }
 });

@@ -120,7 +120,7 @@ const sourcePlatformLabels: Record<string, string> = {
 };
 const configurableSources = new Set(["twitter", "weibo", "github", "reddit"]);
 const pushChannelLabels: Record<PushChannel, string> = {
-  local: "本地记录",
+  local: "本地记录（仅日志）",
   telegram: "Telegram",
   feishu: "飞书机器人",
 };
@@ -151,6 +151,12 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
 
 function classNames(...items: Array<string | false | undefined>) {
   return items.filter(Boolean).join(" ");
+}
+
+function preferredPushTarget(channels: PushChannels): PushChannel {
+  if (channels.feishu) return "feishu";
+  if (channels.telegram) return "telegram";
+  return "local";
 }
 
 async function copyText(value: string) {
@@ -1247,7 +1253,11 @@ export function App() {
       setSettings(settingsData.settings);
       setAssets(assetsData.assets);
       setPushLog(pushData.pushLog);
-      setPushChannels({ local: true, telegram: Boolean(pushData.channels?.telegram), feishu: Boolean(pushData.channels?.feishu) });
+      const nextPushChannels = { local: true, telegram: Boolean(pushData.channels?.telegram), feishu: Boolean(pushData.channels?.feishu) };
+      setPushChannels(nextPushChannels);
+      if (pushTarget === "local" && (nextPushChannels.feishu || nextPushChannels.telegram)) {
+        setPushTarget(preferredPushTarget(nextPushChannels));
+      }
       setKeywords(radarData.keywords);
       setAnalytics(analyticsData.analytics);
       if (!selectedId && topicData.topics[0]) setSelectedId(topicData.topics[0].id);
