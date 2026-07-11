@@ -23,6 +23,8 @@ cp .env.example .env
 npm run dev
 ```
 
+开发服务默认只监听本机。对外部署请使用 `npm run build && npm start` 或 Docker，不要直接暴露 Vite 开发服务器。
+
 打开：
 
 - 前端工作台：http://localhost:5173
@@ -44,9 +46,15 @@ npm start
 常用环境变量：
 
 - `PORT`：API 和生产静态服务端口，默认 `8787`
+- `HOST`：监听地址，默认 `127.0.0.1`；对外监听前必须配置 `ADMIN_TOKEN`
 - `DATA_DIR`：本地数据目录，默认 `./data`
 - `AUTO_REFRESH`：是否启动后定时刷新，默认 `true`
 - `INITIAL_REFRESH`：启动时无数据是否自动抓取，默认 `true`
+- `SOURCE_CONCURRENCY`：并行抓取数据源数量，默认 `4`
+- `MAX_BODY_BYTES`：API 请求体上限，默认 `1048576`
+- `MUTATION_RATE_LIMIT`：每个客户端每分钟的写操作上限，默认 `30`
+- `REQUIRE_AUTH` / `ADMIN_TOKEN`：启用 Bearer API 认证
+- `VITE_ADMIN_TOKEN`：前端构建时使用的 Bearer Token，单用户部署使用
 - `TWITTER_ENABLED`：是否启用 X/Twitter Recent Search
 - `X_BEARER_TOKEN`：X API Bearer Token，启用 Twitter 源时必填
 - `X_SEARCH_QUERY`：可选，直接指定 X Recent Search 查询；为空时使用 `TRACK_KEYWORDS` 组合

@@ -4,6 +4,16 @@ Base URL in development: `http://localhost:8787`.
 
 All endpoints return JSON.
 
+## Authentication
+
+When `REQUIRE_AUTH=true`, every endpoint except `GET /api/health` requires:
+
+```http
+Authorization: Bearer <ADMIN_TOKEN>
+```
+
+The browser build sends `VITE_ADMIN_TOKEN` automatically. This is suitable for a single-user private deployment. For multiple users, put the service behind a reverse proxy with per-user authentication instead of sharing one administrator token.
+
 ## Health
 
 ```http
@@ -15,7 +25,7 @@ Returns service status, last refresh time, and topic count.
 ## Topics
 
 ```http
-GET /api/topics?platform=全部&category=全部&region=全球&q=
+GET /api/topics?platform=全部&category=全部&region=全部&timeWindow=24h&q=
 ```
 
 Returns filtered topics, stats, and `lastRefreshAt`.
@@ -24,7 +34,8 @@ Query parameters:
 
 - `platform`: platform name or `全部`
 - `category`: category name or `全部`
-- `region`: region name or `全球`
+- `region`: region name or `全部`
+- `timeWindow`: `15m`, `1h`, `6h`, `24h`, or `7d`
 - `q`: keyword search
 
 ## Refresh

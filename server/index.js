@@ -1,8 +1,11 @@
-import { createHash, createHmac } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { extname, join, resolve } from "node:path";
+import { isIP } from "node:net";
+import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { XMLParser } from "fast-xml-parser";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const rootDir = resolve(__dirname, "..");
@@ -12,8 +15,21 @@ loadEnvFile(join(rootDir, ".env"));
 const dataDir = process.env.DATA_DIR ? resolve(rootDir, process.env.DATA_DIR) : join(rootDir, "data");
 const distDir = join(rootDir, "dist");
 const port = Number(process.env.PORT || 8787);
+const host = process.env.HOST || "127.0.0.1";
+const adminToken = process.env.ADMIN_TOKEN || "";
+const requireAuth = parseBool(process.env.REQUIRE_AUTH, Boolean(adminToken));
+const maxBodyBytes = Math.max(16 * 1024, Math.min(4 * 1024 * 1024, Number(process.env.MAX_BODY_BYTES || 1024 * 1024)));
+const sourceConcurrency = Math.max(1, Math.min(8, Number(process.env.SOURCE_CONCURRENCY || 4)));
+const mutationRateLimit = Math.max(5, Math.min(300, Number(process.env.MUTATION_RATE_LIMIT || 30)));
 const autoRefresh = parseBool(process.env.AUTO_REFRESH, true);
 const initialRefresh = parseBool(process.env.INITIAL_REFRESH, true);
+
+if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PORT must be an integer between 1 and 65535");
+if (!Number.isInteger(maxBodyBytes)) throw new Error("MAX_BODY_BYTES must be a number");
+if (!Number.isInteger(sourceConcurrency) || sourceConcurrency < 1 || sourceConcurrency > 8) throw new Error("SOURCE_CONCURRENCY must be an integer between 1 and 8");
+if (!Number.isInteger(mutationRateLimit)) throw new Error("MUTATION_RATE_LIMIT must be a number");
+if (requireAuth && !adminToken) throw new Error("ADMIN_TOKEN is required when REQUIRE_AUTH=true");
+if (!isLoopbackHost(host) && !adminToken) throw new Error("ADMIN_TOKEN is required when HOST is not loopback");
 
 if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
 
@@ -122,6 +138,16 @@ const defaultSettings = {
   },
 };
 
+const copyModes = ["快讯版", "锐评版", "Thread版", "Meme版", "带节奏版"];
+const redactedSecret = "********";
+const xmlParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: "@_",
+  cdataPropName: "#cdata",
+  textNodeName: "#text",
+  trimValues: true,
+});
+
 const defaultAssets = [
   {
     id: "persona-crypto",
@@ -146,42 +172,26 @@ const defaultAssets = [
   },
 ];
 
-let memory = loadJson(statePath, {
+let memory = normalizeMemory(loadJson(statePath, {
   topics: [],
   jobs: [],
   stats: emptyStats(),
   lastRefreshAt: null,
-});
-let settings = loadJson(settingsPath, defaultSettings);
-settings = {
-  ...defaultSettings,
-  ...settings,
-  sources: { ...defaultSettings.sources, ...(settings.sources || {}) },
-  sourceConfig: {
-    ...defaultSettings.sourceConfig,
-    ...(settings.sourceConfig || {}),
-    twitter: { ...defaultSettings.sourceConfig.twitter, ...(settings.sourceConfig?.twitter || {}) },
-    weibo: { ...defaultSettings.sourceConfig.weibo, ...(settings.sourceConfig?.weibo || {}) },
-    github: { ...defaultSettings.sourceConfig.github, ...(settings.sourceConfig?.github || {}) },
-    reddit: { ...defaultSettings.sourceConfig.reddit, ...(settings.sourceConfig?.reddit || {}) },
-    tiktok: { ...defaultSettings.sourceConfig.tiktok, ...(settings.sourceConfig?.tiktok || {}) },
-    instagram: { ...defaultSettings.sourceConfig.instagram, ...(settings.sourceConfig?.instagram || {}) },
-    huggingFace: { ...defaultSettings.sourceConfig.huggingFace, ...(settings.sourceConfig?.huggingFace || {}) },
-    openaiBlog: { ...defaultSettings.sourceConfig.openaiBlog, ...(settings.sourceConfig?.openaiBlog || {}) },
-    deepmind: { ...defaultSettings.sourceConfig.deepmind, ...(settings.sourceConfig?.deepmind || {}) },
-    anthropic: { ...defaultSettings.sourceConfig.anthropic, ...(settings.sourceConfig?.anthropic || {}) },
-    glassnode: { ...defaultSettings.sourceConfig.glassnode, ...(settings.sourceConfig?.glassnode || {}) },
-    coinMarketCap: { ...defaultSettings.sourceConfig.coinMarketCap, ...(settings.sourceConfig?.coinMarketCap || {}) },
-    wikipedia: { ...defaultSettings.sourceConfig.wikipedia, ...(settings.sourceConfig?.wikipedia || {}) },
-    youtube: { ...defaultSettings.sourceConfig.youtube, ...(settings.sourceConfig?.youtube || {}) },
-  },
-  telegram: { ...defaultSettings.telegram, ...(settings.telegram || {}) },
-  feishu: { ...defaultSettings.feishu, ...(settings.feishu || {}) },
-};
-let assets = loadJson(assetsPath, defaultAssets);
-let pushLog = loadJson(pushPath, []);
+  history: {},
+}));
+let settings = normalizeSettings(loadJson(settingsPath, defaultSettings));
+let assets = normalizeAssets(loadJson(assetsPath, defaultAssets));
+let pushLog = normalizePushLog(loadJson(pushPath, []));
 let refreshInFlight = false;
 let refreshTimer = null;
+const rateBuckets = new Map();
+
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
 
 function loadEnvFile(path) {
   if (!existsSync(path)) return;
@@ -205,6 +215,10 @@ function parseBool(value, fallback) {
   return ["1", "true", "yes", "on"].includes(String(value).toLowerCase());
 }
 
+function isLoopbackHost(value) {
+  return ["127.0.0.1", "localhost", "::1"].includes(String(value).toLowerCase());
+}
+
 function csv(value, fallback) {
   if (!value) return fallback;
   return value
@@ -225,11 +239,147 @@ function loadJson(path, fallback) {
   }
 }
 
+function normalizeMemory(input) {
+  const value = input && typeof input === "object" ? input : {};
+  const stats = value.stats && typeof value.stats === "object" ? value.stats : {};
+  return {
+    topics: Array.isArray(value.topics) ? value.topics : [],
+    jobs: Array.isArray(value.jobs) ? value.jobs.slice(0, 80) : [],
+    history: isRecord(value.history) ? value.history : {},
+    stats: {
+      ...emptyStats(),
+      ...stats,
+      discovered: finiteNumber(stats.discovered, 0, { min: 0, integer: true }),
+      hot: finiteNumber(stats.hot, 0, { min: 0, integer: true }),
+      generated: finiteNumber(stats.generated, 0, { min: 0, integer: true }),
+      pushed: finiteNumber(stats.pushed, 0, { min: 0, integer: true }),
+      failedSources: finiteNumber(stats.failedSources, 0, { min: 0, integer: true }),
+      activeSources: finiteNumber(stats.activeSources, 0, { min: 0, integer: true }),
+    },
+    lastRefreshAt: typeof value.lastRefreshAt === "string" ? value.lastRefreshAt : null,
+  };
+}
+
+function normalizeAssets(input) {
+  if (!Array.isArray(input)) return structuredClone(defaultAssets);
+  return input.map((asset, index) => ({
+    id: String(asset?.id || `asset-${index}`),
+    type: String(asset?.type || "素材").slice(0, 60),
+    name: String(asset?.name || "未命名素材").slice(0, 120),
+    description: String(asset?.description || "").slice(0, 2000),
+    tags: Array.isArray(asset?.tags) ? asset.tags.map((tag) => String(tag).slice(0, 40)).slice(0, 20) : [],
+  }));
+}
+
+function normalizePushLog(input) {
+  if (!Array.isArray(input)) return [];
+  return input.slice(0, 200).map((entry, index) => ({
+    id: String(entry?.id || `push-${index}`),
+    text: String(entry?.text || "").slice(0, 4096),
+    createdAt: typeof entry?.createdAt === "string" ? entry.createdAt : nowIso(),
+    status: String(entry?.status || "unknown"),
+    target: String(entry?.target || "local"),
+    ...(entry?.error ? { error: String(entry.error).slice(0, 500) } : {}),
+  }));
+}
+
+function finiteNumber(value, fallback, { min = -Infinity, max = Infinity, integer = false } = {}) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  const normalized = integer ? Math.round(number) : number;
+  return Math.max(min, Math.min(max, normalized));
+}
+
+function stringList(value, fallback) {
+  const rows = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : fallback;
+  return rows.map((item) => String(item).trim()).filter(Boolean);
+}
+
+function normalizeSettings(input = {}) {
+  const sourceValues = input.sources || {};
+  const sourceConfig = input.sourceConfig || {};
+  const next = {
+    ...defaultSettings,
+    ...input,
+    sources: Object.fromEntries(
+      Object.entries(defaultSettings.sources).map(([key, fallback]) => [key, parseBool(sourceValues[key], fallback)]),
+    ),
+    sourceConfig: {
+      ...defaultSettings.sourceConfig,
+      ...sourceConfig,
+      twitter: { ...defaultSettings.sourceConfig.twitter, ...(sourceConfig.twitter || {}) },
+      weibo: { ...defaultSettings.sourceConfig.weibo, ...(sourceConfig.weibo || {}) },
+      github: { ...defaultSettings.sourceConfig.github, ...(sourceConfig.github || {}) },
+      reddit: { ...defaultSettings.sourceConfig.reddit, ...(sourceConfig.reddit || {}) },
+      tiktok: { ...defaultSettings.sourceConfig.tiktok, ...(sourceConfig.tiktok || {}) },
+      instagram: { ...defaultSettings.sourceConfig.instagram, ...(sourceConfig.instagram || {}) },
+      huggingFace: { ...defaultSettings.sourceConfig.huggingFace, ...(sourceConfig.huggingFace || {}) },
+      openaiBlog: { ...defaultSettings.sourceConfig.openaiBlog, ...(sourceConfig.openaiBlog || {}) },
+      deepmind: { ...defaultSettings.sourceConfig.deepmind, ...(sourceConfig.deepmind || {}) },
+      anthropic: { ...defaultSettings.sourceConfig.anthropic, ...(sourceConfig.anthropic || {}) },
+      glassnode: { ...defaultSettings.sourceConfig.glassnode, ...(sourceConfig.glassnode || {}) },
+      coinMarketCap: { ...defaultSettings.sourceConfig.coinMarketCap, ...(sourceConfig.coinMarketCap || {}) },
+      wikipedia: { ...defaultSettings.sourceConfig.wikipedia, ...(sourceConfig.wikipedia || {}) },
+      youtube: { ...defaultSettings.sourceConfig.youtube, ...(sourceConfig.youtube || {}) },
+    },
+    telegram: { ...defaultSettings.telegram, ...(input.telegram || {}) },
+    feishu: { ...defaultSettings.feishu, ...(input.feishu || {}) },
+  };
+  return {
+    ...next,
+    refreshIntervalMinutes: finiteNumber(next.refreshIntervalMinutes, defaultSettings.refreshIntervalMinutes, { min: 1, max: 1440, integer: true }),
+    heatThreshold: finiteNumber(next.heatThreshold, defaultSettings.heatThreshold, { min: 0, max: 100 }),
+    riskThreshold: ["低", "中", "高"].includes(next.riskThreshold) ? next.riskThreshold : defaultSettings.riskThreshold,
+    keywords: stringList(next.keywords, defaultSettings.keywords),
+    blockedWords: stringList(next.blockedWords, defaultSettings.blockedWords),
+    sourceConfig: {
+      ...next.sourceConfig,
+      twitter: {
+        ...next.sourceConfig.twitter,
+        maxResults: finiteNumber(next.sourceConfig.twitter.maxResults, defaultSettings.sourceConfig.twitter.maxResults, { min: 10, max: 100, integer: true }),
+        queryMaxChars: finiteNumber(next.sourceConfig.twitter.queryMaxChars, defaultSettings.sourceConfig.twitter.queryMaxChars, { min: 1, max: 4096, integer: true }),
+      },
+    },
+    telegram: { ...next.telegram, enabled: parseBool(next.telegram.enabled, defaultSettings.telegram.enabled) },
+    feishu: { ...next.feishu, enabled: parseBool(next.feishu.enabled, defaultSettings.feishu.enabled) },
+  };
+}
+
+function clientSettings() {
+  const value = structuredClone(settings);
+  const secretPaths = [
+    ["sourceConfig", "twitter", "bearerToken"],
+    ["sourceConfig", "github", "token"],
+    ["sourceConfig", "glassnode", "apiKey"],
+    ["sourceConfig", "coinMarketCap", "apiKey"],
+    ["telegram", "botToken"],
+    ["feishu", "webhookUrl"],
+    ["feishu", "secret"],
+  ];
+  for (const path of secretPaths) {
+    let target = value;
+    for (const segment of path.slice(0, -1)) target = target?.[segment];
+    const key = path.at(-1);
+    if (target?.[key]) target[key] = redactedSecret;
+  }
+  return value;
+}
+
+function preserveRedactedSecret(value, current) {
+  return value === redactedSecret ? current : value;
+}
+
 function persist() {
-  writeFileSync(statePath, JSON.stringify(memory, null, 2));
-  writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-  writeFileSync(assetsPath, JSON.stringify(assets, null, 2));
-  writeFileSync(pushPath, JSON.stringify(pushLog.slice(0, 200), null, 2));
+  writeJsonAtomic(statePath, memory);
+  writeJsonAtomic(settingsPath, settings);
+  writeJsonAtomic(assetsPath, assets);
+  writeJsonAtomic(pushPath, pushLog.slice(0, 200));
+}
+
+function writeJsonAtomic(path, value) {
+  const tempPath = `${path}.${process.pid}.tmp`;
+  writeFileSync(tempPath, JSON.stringify(value, null, 2));
+  renameSync(tempPath, path);
 }
 
 function scheduleAutoRefresh() {
@@ -352,34 +502,42 @@ function extractKeywords(text) {
 }
 
 function heatScore(raw) {
-  const recency = Math.max(0, 42 - Math.sqrt(minutesAgo(raw.publishedAt || Date.now())) * 2.6);
-  const engagement = Math.log10((raw.score || 0) + (raw.comments || 0) * 2 + 10) * 19;
-    const sourceWeight =
+  const recency = Math.max(0, 34 - Math.sqrt(minutesAgo(raw.publishedAt)) * 2.1);
+  const engagementBase = Math.max(0, Number(raw.score || 0) + Number(raw.comments || 0) * 2);
+  const engagement = Math.min(42, Math.log1p(engagementBase) * 5.5);
+  const sourceWeight =
     raw.platform === "X"
-      ? 20
+      ? 12
       : raw.platform === "微博"
-        ? 20
+        ? 12
         : raw.platform === "TikTok" || raw.platform === "Instagram"
-          ? 19
+          ? 11
           : raw.platform === "GitHub"
-            ? 16
+            ? 10
             : raw.platform === "CoinGecko"
-              ? 18
+              ? 10
               : raw.platform === "Hacker News"
-                ? 18
+                ? 10
                 : raw.platform === "arXiv"
-                  ? 15
-                  : 10;
-  return Math.max(30, Math.min(99.8, recency + engagement + sourceWeight));
+                  ? 8
+                  : 6;
+  return Math.max(0, Math.min(99.8, recency + engagement + sourceWeight));
 }
 
-function trendFor(score, seed) {
-  const base = Math.max(8, Math.round(score * 0.45));
-  return Array.from({ length: 11 }, (_, index) => {
-    const wave = Math.sin((index + seed.length) * 0.9) * 5;
-    const lift = index * (score - base) / 10;
-    return Math.max(3, Math.min(100, Math.round(base + lift + wave)));
-  });
+function historyFor(topicId) {
+  const history = memory.history?.[topicId];
+  return Array.isArray(history) ? history.filter((row) => Number.isFinite(row?.heat)) : [];
+}
+
+function trendFor(history, currentHeat) {
+  const values = [...history.slice(-10).map((row) => row.heat), currentHeat];
+  return values.length < 2 ? [currentHeat, currentHeat] : values;
+}
+
+function boostFor(history, currentHeat) {
+  const previous = history.at(-1)?.heat;
+  if (!Number.isFinite(previous) || previous <= 0) return 0;
+  return Math.round(((currentHeat - previous) / previous) * 100);
 }
 
 function normalizeTopic(raw) {
@@ -396,9 +554,9 @@ function normalizeTopic(raw) {
     platform: raw.platform,
     source: raw.source || raw.platform,
     category,
-    region: regionFor(text),
+    region: raw.region || regionFor(text),
     heat: Number(heat.toFixed(1)),
-    boost: Math.round(Math.max(12, heat * 2.6 - minutesAgo(raw.publishedAt) * 0.2)),
+    boost: 0,
     sentiment: sentimentFor(text, risk),
     risk,
     url: raw.url || "",
@@ -407,7 +565,7 @@ function normalizeTopic(raw) {
     crawledAt: nowIso(),
     score: raw.score || 0,
     commentsCount: raw.comments || 0,
-    trend: trendFor(heat, title),
+    trend: [heat, heat],
     keywords: extractKeywords(text),
   };
   topic.summary = makeSummary(topic);
@@ -471,46 +629,112 @@ function feishuSignature(timestamp, secret) {
   return createHmac("sha256", `${timestamp}\n${secret}`).update("").digest("base64");
 }
 
-async function fetchJson(url, options = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 9000);
-  try {
-    const res = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-      headers: {
-        "user-agent": "ai-hottopics/0.1 (+local research dashboard)",
-        accept: "application/json,text/plain,*/*",
-        ...(options.headers || {}),
-      },
-    });
-    const text = await res.text();
-    if (!res.ok) {
-      const detail = stripHtml(text).slice(0, 240);
-      throw new Error(`${res.status} ${res.statusText}${detail ? `: ${detail}` : ""}`);
-    }
-    return text ? JSON.parse(text) : {};
-  } finally {
-    clearTimeout(timer);
+function isPrivateAddress(address) {
+  if (isIP(address) === 4) {
+    const octets = address.split(".").map(Number);
+    const [a, b] = octets;
+    return (
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 198 && (b === 18 || b === 19)) ||
+      a >= 224
+    );
   }
+  const lower = String(address).toLowerCase();
+  return lower === "::1" || lower.startsWith("fc") || lower.startsWith("fd") || lower.startsWith("fe80:") || lower.startsWith("::ffff:127.");
+}
+
+async function assertSafeUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("Invalid external URL");
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+    throw new Error("External URL must use http(s) without credentials");
+  }
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local") || hostname.endsWith(".internal") || hostname === "metadata.google.internal") {
+    throw new Error("Private external hosts are not allowed");
+  }
+  if (isIP(hostname) && isPrivateAddress(hostname)) throw new Error("Private external IPs are not allowed");
+  try {
+    const addresses = await lookup(hostname, { all: true, verbatim: true });
+    if (addresses.some(({ address }) => isPrivateAddress(address))) throw new Error("Private external IPs are not allowed");
+  } catch (error) {
+    if (error.message === "Private external IPs are not allowed") throw error;
+    throw new Error(`Unable to resolve external host: ${hostname}`);
+  }
+  return parsed;
+}
+
+async function fetchWithPolicy(url, options = {}) {
+  let nextUrl = String(url);
+  for (let redirects = 0; redirects <= 3; redirects += 1) {
+    await assertSafeUrl(nextUrl);
+    const { timeoutMs: _timeoutMs, ...fetchOptions } = options;
+    const response = await fetch(nextUrl, {
+      ...fetchOptions,
+      signal: AbortSignal.timeout(options.timeoutMs || 9000),
+      redirect: "manual",
+    });
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    const location = response.headers.get("location");
+    if (!location || redirects === 3) throw new Error("Too many external redirects");
+    nextUrl = new URL(location, nextUrl).toString();
+  }
+  throw new Error("Too many external redirects");
+}
+
+async function readResponseText(response, limit = 2 * 1024 * 1024) {
+  const contentLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > limit) throw new Error("External response is too large");
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel();
+      throw new Error("External response is too large");
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function fetchJson(url, options = {}) {
+  const res = await fetchWithPolicy(url, {
+    ...options,
+    headers: { "user-agent": "ai-hottopics/0.1 (+local research dashboard)", accept: "application/json,text/plain,*/*", ...(options.headers || {}) },
+  });
+  const text = await readResponseText(res);
+  if (!res.ok) {
+    const detail = stripHtml(text).slice(0, 240);
+    throw new Error(`${res.status} ${res.statusText}${detail ? `: ${detail}` : ""}`);
+  }
+  return text ? JSON.parse(text) : {};
 }
 
 async function fetchText(url) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 9000);
-  try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        "user-agent": "ai-hottopics/0.1 (+local research dashboard)",
-        accept: "application/rss+xml,text/xml,text/plain,*/*",
-      },
-    });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    return await res.text();
-  } finally {
-    clearTimeout(timer);
-  }
+  const res = await fetchWithPolicy(url, {
+    headers: {
+      "user-agent": "ai-hottopics/0.1 (+local research dashboard)",
+      accept: "application/rss+xml,text/xml,text/plain,*/*",
+    },
+  });
+  const text = await readResponseText(res);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return text;
 }
 
 async function crawlTwitter() {
@@ -617,25 +841,48 @@ async function crawlHackerNews() {
   }));
 }
 
-function parseAtom(xml, source) {
-  const entries = [];
-  const entryMatches = xml.match(/<entry>[\s\S]*?<\/entry>/g) || [];
-  for (const entry of entryMatches.slice(0, 18)) {
-    const pick = (tag) => stripHtml((entry.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`)) || [])[1] || "");
-    const link = (entry.match(/<link[^>]+href="([^"]+)"/) || [])[1] || "";
-    entries.push({
-      platform: "arXiv",
-      source,
-      title: pick("title"),
-      desc: pick("summary"),
-      url: link,
-      author: source,
-      publishedAt: pick("published") || pick("updated") || nowIso(),
-      score: 130,
-      comments: 10,
-    });
+function valueText(value) {
+  if (Array.isArray(value)) return valueText(value[0]);
+  if (value && typeof value === "object") return value["#cdata"] || value["#text"] || "";
+  return value === undefined || value === null ? "" : String(value);
+}
+
+function arrayValue(value) {
+  return Array.isArray(value) ? value : value ? [value] : [];
+}
+
+function feedLink(value) {
+  for (const link of arrayValue(value)) {
+    if (typeof link === "string") return link;
+    if (link && typeof link === "object" && link["@_href"]) return String(link["@_href"]);
   }
-  return entries;
+  return "";
+}
+
+function parseFeed(xml) {
+  let document;
+  try {
+    document = xmlParser.parse(xml);
+  } catch (error) {
+    throw new Error(`Invalid feed XML: ${safeError(error)}`);
+  }
+  const rssItems = document.rss?.channel?.item || document["rdf:RDF"]?.item;
+  const atomItems = document.feed?.entry;
+  return arrayValue(rssItems || atomItems);
+}
+
+function parseAtom(xml, source) {
+  return parseFeed(xml).slice(0, 18).map((entry) => ({
+    platform: "arXiv",
+    source,
+    title: valueText(entry.title),
+    desc: valueText(entry.summary || entry.content),
+    url: feedLink(entry.link),
+    author: source,
+    publishedAt: valueText(entry.published || entry.updated) || undefined,
+    score: 130,
+    comments: 10,
+  }));
 }
 
 async function crawlArxiv() {
@@ -709,17 +956,15 @@ async function crawlReddit() {
 
 function parseRss(xml, source, platform = "Google News") {
   const items = [];
-  const itemMatches = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
-  for (const [index, item] of itemMatches.slice(0, 25).entries()) {
-    const pick = (tag) => stripHtml((item.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`)) || [])[1] || "");
+  for (const [index, item] of parseFeed(xml).slice(0, 25).entries()) {
     items.push({
       platform,
       source,
-      title: pick("title"),
-      desc: pick("description"),
-      url: pick("link"),
+      title: valueText(item.title),
+      desc: valueText(item.description || item["content:encoded"] || item.summary || item.content),
+      url: feedLink(item.link || item.guid),
       author: source,
-      publishedAt: pick("pubDate") || nowIso(),
+      publishedAt: valueText(item.pubDate || item.published || item.updated) || undefined,
       score: platform === "微博" ? Math.max(100, 520 - index * 14) : platform === "TikTok" || platform === "Instagram" ? Math.max(90, 260 - index * 8) : 80,
       comments: platform === "微博" ? Math.max(10, 80 - index * 2) : platform === "TikTok" || platform === "Instagram" ? Math.max(8, 45 - index) : 12,
     });
@@ -874,7 +1119,7 @@ async function crawlGoogleNews() {
 }
 
 async function runRefresh({ manual = false } = {}) {
-  if (refreshInFlight) return memory;
+  if (refreshInFlight) return null;
   refreshInFlight = true;
   const job = {
     id: idFor(`${Date.now()}:refresh`),
@@ -888,94 +1133,124 @@ async function runRefresh({ manual = false } = {}) {
   memory.jobs.unshift(job);
   memory.jobs = memory.jobs.slice(0, 80);
 
-  const sourceTasks = [
-    ["twitter", "X Recent Search", crawlTwitter],
-    ["weibo", "Weibo Hot Search", crawlWeibo],
-    ["hackerNews", "Hacker News", crawlHackerNews],
-    ["arxiv", "arXiv", crawlArxiv],
-    ["googleNews", "Google News RSS", crawlGoogleNews],
-    ["github", "GitHub Search", crawlGithub],
-    ["reddit", "Reddit", crawlReddit],
-    ["coingecko", "CoinGecko", crawlCoinGecko],
-    ["tiktok", "TikTok RSS", () => crawlConfiguredRss("tiktok", "TikTok", "TikTok RSS")],
-    ["instagram", "Instagram RSS", () => crawlConfiguredRss("instagram", "Instagram", "Instagram RSS")],
-    ["huggingFace", "Hugging Face Blog", () => crawlConfiguredRss("huggingFace", "Hugging Face", "Hugging Face Blog")],
-    ["openaiBlog", "OpenAI News", () => crawlConfiguredRss("openaiBlog", "OpenAI", "OpenAI News")],
-    ["deepmind", "Google DeepMind Blog", () => crawlConfiguredRss("deepmind", "Google DeepMind", "Google DeepMind Blog")],
-    ["anthropic", "Anthropic News", () => crawlConfiguredRss("anthropic", "Anthropic", "Anthropic News")],
-    ["glassnode", "Glassnode", crawlGlassnode],
-    ["coinMarketCap", "CoinMarketCap", crawlCoinMarketCap],
-    ["wikipedia", "Wikipedia", crawlWikipedia],
-    ["youtube", "YouTube RSS", () => crawlConfiguredRss("youtube", "YouTube", "YouTube RSS")],
-  ].filter(([key]) => settings.sources[key]);
+  try {
+    const sourceTasks = [
+      ["twitter", "X Recent Search", crawlTwitter],
+      ["weibo", "Weibo Hot Search", crawlWeibo],
+      ["hackerNews", "Hacker News", crawlHackerNews],
+      ["arxiv", "arXiv", crawlArxiv],
+      ["googleNews", "Google News RSS", crawlGoogleNews],
+      ["github", "GitHub Search", crawlGithub],
+      ["reddit", "Reddit", crawlReddit],
+      ["coingecko", "CoinGecko", crawlCoinGecko],
+      ["tiktok", "TikTok RSS", () => crawlConfiguredRss("tiktok", "TikTok", "TikTok RSS")],
+      ["instagram", "Instagram RSS", () => crawlConfiguredRss("instagram", "Instagram", "Instagram RSS")],
+      ["huggingFace", "Hugging Face Blog", () => crawlConfiguredRss("huggingFace", "Hugging Face", "Hugging Face Blog")],
+      ["openaiBlog", "OpenAI News", () => crawlConfiguredRss("openaiBlog", "OpenAI", "OpenAI News")],
+      ["deepmind", "Google DeepMind Blog", () => crawlConfiguredRss("deepmind", "Google DeepMind", "Google DeepMind Blog")],
+      ["anthropic", "Anthropic News", () => crawlConfiguredRss("anthropic", "Anthropic", "Anthropic News")],
+      ["glassnode", "Glassnode", crawlGlassnode],
+      ["coinMarketCap", "CoinMarketCap", crawlCoinMarketCap],
+      ["wikipedia", "Wikipedia", crawlWikipedia],
+      ["youtube", "YouTube RSS", () => crawlConfiguredRss("youtube", "YouTube", "YouTube RSS")],
+    ].filter(([key]) => settings.sources[key]);
 
   const raw = [];
-  for (const [, name, fn] of sourceTasks) {
-    const started = Date.now();
-    try {
-      const items = await fn();
-      raw.push(...items);
-      job.sources.push({ name, status: "ok", count: items.length, ms: Date.now() - started });
-    } catch (error) {
-      job.sources.push({ name, status: "failed", count: 0, ms: Date.now() - started, error: error.message });
+  let nextTask = 0;
+  async function worker() {
+    while (nextTask < sourceTasks.length) {
+      const taskIndex = nextTask;
+      nextTask += 1;
+      const [, name, fn] = sourceTasks[taskIndex];
+      const started = Date.now();
+      try {
+        const items = await fn();
+        raw.push(...items);
+        job.sources.push({ name, status: "ok", count: items.length, ms: Date.now() - started });
+      } catch (error) {
+        job.sources.push({ name, status: "failed", count: 0, ms: Date.now() - started, error: safeError(error) });
+      }
     }
   }
+  await Promise.all(Array.from({ length: Math.min(sourceConcurrency, sourceTasks.length) }, () => worker()));
 
-  const merged = new Map();
-  for (const item of raw) {
-    if (!item.title) continue;
-    const normalized = normalizeTopic(item);
-    const key = normalized.title.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "").slice(0, 42);
-    const existing = merged.get(key);
-    if (!existing || normalized.heat > existing.heat) merged.set(key, normalized);
-  }
+    const merged = new Map();
+    for (const item of raw) {
+      if (!item.title) continue;
+      const normalized = normalizeTopic(item);
+      const key = normalized.title.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "").slice(0, 42);
+      const existing = merged.get(key);
+      if (!existing || normalized.heat > existing.heat) merged.set(key, normalized);
+    }
 
-  const oldTopics = new Map(memory.topics.map((topic) => [topic.id, topic]));
-  memory.topics = [...merged.values()]
-    .map((topic) => {
-      const old = oldTopics.get(topic.id);
-      if (old) {
-        const heat = Math.max(topic.heat, old.heat * 0.92);
+    const oldTopics = new Map(memory.topics.map((topic) => [topic.id, topic]));
+    const nextHistory = { ...(memory.history || {}) };
+    memory.topics = [...merged.values()]
+      .map((topic) => {
+        const old = oldTopics.get(topic.id);
+        const history = historyFor(topic.id);
+        const heat = Number(topic.heat.toFixed(1));
+        nextHistory[topic.id] = [...history, { at: topic.crawledAt, heat }].slice(-48);
         return {
           ...topic,
-          firstSeenAt: old.firstSeenAt || topic.crawledAt,
-          heat: Number(heat.toFixed(1)),
+          firstSeenAt: old?.firstSeenAt || topic.crawledAt,
+          heat,
+          boost: boostFor(history, heat),
+          trend: trendFor(history, heat),
         };
-      }
-      return { ...topic, firstSeenAt: topic.crawledAt };
-    })
-    .sort((a, b) => b.heat - a.heat)
-    .slice(0, 120);
+      })
+      .sort((a, b) => b.heat - a.heat)
+      .slice(0, 120);
+    const activeTopicIds = new Set(memory.topics.map((topic) => topic.id));
+    memory.history = Object.fromEntries(Object.entries(nextHistory).filter(([id]) => activeTopicIds.has(id)));
 
-  job.status = "success";
-  job.finishedAt = nowIso();
-  job.message = `抓取 ${raw.length} 条，归并 ${memory.topics.length} 个热点`;
-  memory.lastRefreshAt = nowIso();
-  memory.stats = {
-    discovered: memory.topics.length,
-    hot: memory.topics.filter((topic) => topic.heat >= settings.heatThreshold).length,
-    generated: memory.stats.generated || 0,
-    pushed: pushLog.filter((item) => item.status === "sent" || item.status === "simulated").length,
-    failedSources: job.sources.filter((source) => source.status === "failed").length,
-    activeSources: job.sources.filter((source) => source.status === "ok").length,
-  };
-  refreshInFlight = false;
-  persist();
-  return memory;
+    const failedSources = job.sources.filter((source) => source.status === "failed").length;
+    job.status = failedSources === 0 ? "success" : raw.length > 0 ? "partial" : "failed";
+    job.finishedAt = nowIso();
+    job.message = `抓取 ${raw.length} 条，归并 ${memory.topics.length} 个热点${failedSources ? `，${failedSources} 个数据源失败` : ""}`;
+    memory.lastRefreshAt = nowIso();
+    memory.stats = {
+      discovered: memory.topics.length,
+      hot: memory.topics.filter((topic) => topic.heat >= settings.heatThreshold).length,
+      generated: memory.stats.generated || 0,
+      pushed: pushLog.filter((item) => item.status === "sent" || item.status === "simulated").length,
+      failedSources,
+      activeSources: job.sources.filter((source) => source.status === "ok").length,
+    };
+    persist();
+    return memory;
+  } catch (error) {
+    job.status = "failed";
+    job.finishedAt = nowIso();
+    job.message = error.message || "抓取失败";
+    memory.stats = {
+      ...memory.stats,
+      failedSources: job.sources.filter((source) => source.status === "failed").length,
+      activeSources: job.sources.filter((source) => source.status === "ok").length,
+    };
+    persist();
+    throw error;
+  } finally {
+    refreshInFlight = false;
+  }
 }
 
 function filteredTopics(query) {
   const params = new URLSearchParams(query);
   const platform = params.get("platform") || "全部";
   const category = params.get("category") || "全部";
-  const region = params.get("region") || "全球";
+  const region = params.get("region") || "全部";
+  const timeWindow = params.get("timeWindow") || "24h";
   const keyword = (params.get("q") || "").toLowerCase().trim();
+  const windowMinutes = { "15m": 15, "1h": 60, "6h": 360, "24h": 1440, "7d": 10080 }[timeWindow];
   return memory.topics.filter((topic) => {
     const platformOk = platform === "全部" || topic.platform === platform;
     const categoryOk = category === "全部" || topic.category === category;
-    const regionOk = region === "全球" || topic.region === region;
+    const regionOk = region === "全部" || topic.region === region;
+    const ageMinutes = minutesAgo(topic.publishedAt);
+    const timeOk = !windowMinutes || ageMinutes <= windowMinutes;
     const keywordOk = !keyword || `${topic.title} ${topic.desc} ${topic.keywords.join(" ")}`.toLowerCase().includes(keyword);
-    return platformOk && categoryOk && regionOk && keywordOk;
+    return platformOk && categoryOk && regionOk && timeOk && keywordOk;
   });
 }
 
@@ -1006,14 +1281,22 @@ function analytics() {
   const byCategory = groupCount(memory.topics, "category");
   const byPlatform = groupCount(memory.topics, "platform");
   const byRisk = groupCount(memory.topics, "risk");
-  const timeline = Array.from({ length: 12 }, (_, index) => {
-    const slice = memory.topics.slice(index * 8, index * 8 + 8);
-    return {
-      label: `${index * 2}:00`,
-      heat: Number((slice.reduce((sum, topic) => sum + topic.heat, 0) / Math.max(slice.length, 1)).toFixed(1)),
-      count: slice.length,
-    };
-  });
+  const buckets = new Map();
+  for (const topic of memory.topics) {
+    const timestamp = new Date(topic.publishedAt).getTime();
+    if (!Number.isFinite(timestamp)) continue;
+    const bucket = new Date(timestamp);
+    bucket.setMinutes(0, 0, 0);
+    const label = bucket.toISOString();
+    const row = buckets.get(label) || { label, heat: 0, count: 0 };
+    row.heat += topic.heat;
+    row.count += 1;
+    buckets.set(label, row);
+  }
+  const timeline = [...buckets.values()]
+    .sort((a, b) => a.label.localeCompare(b.label))
+    .slice(-24)
+    .map((row) => ({ ...row, heat: Number((row.heat / row.count).toFixed(1)), label: row.label.slice(0, 13) }));
   return { byCategory, byPlatform, byRisk, timeline };
 }
 
@@ -1024,21 +1307,84 @@ function groupCount(rows, field) {
 }
 
 async function readBody(req) {
+  const declaredLength = Number(req.headers["content-length"]);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBodyBytes) throw new HttpError(413, "Request body is too large");
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let total = 0;
+  for await (const chunk of req) {
+    total += chunk.length;
+    if (total > maxBodyBytes) throw new HttpError(413, "Request body is too large");
+    chunks.push(chunk);
+  }
   const text = Buffer.concat(chunks).toString("utf8");
   if (!text) return {};
+  let body;
   try {
-    return JSON.parse(text);
+    body = JSON.parse(text);
   } catch {
-    return {};
+    throw new HttpError(400, "Request body must be valid JSON");
   }
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(400, "Request body must be a JSON object");
+  return body;
+}
+
+function safeError(error) {
+  return String(error?.message || error || "Unknown error").replace(/(?:token|secret|api[_-]?key)=?[^\s&]+/gi, (value) => `${value.split(/[=:]/, 1)[0]}=[redacted]`).slice(0, 500);
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function boundedString(value, field, { min = 0, max = 4096 } = {}) {
+  if (typeof value !== "string") throw new HttpError(400, `${field} must be a string`);
+  const normalized = value.trim();
+  if (normalized.length < min || normalized.length > max) throw new HttpError(400, `${field} length must be between ${min} and ${max}`);
+  return normalized;
+}
+
+function isAuthorized(req) {
+  if (!requireAuth) return true;
+  const value = req.headers.authorization || "";
+  const [scheme, token] = value.split(" ");
+  if (scheme !== "Bearer" || !token || !adminToken) return false;
+  const expected = Buffer.from(adminToken);
+  const provided = Buffer.from(token);
+  return expected.length === provided.length && timingSafeEqual(expected, provided);
+}
+
+function enforceMutationRateLimit(req) {
+  if (req.method === "GET" || req.method === "HEAD") return;
+  const key = req.socket.remoteAddress || "unknown";
+  const now = Date.now();
+  const bucket = rateBuckets.get(key);
+  if (!bucket || now - bucket.startedAt >= 60_000) {
+    rateBuckets.set(key, { startedAt: now, count: 1 });
+    if (rateBuckets.size > 10_000) {
+      for (const [candidate, value] of rateBuckets) {
+        if (now - value.startedAt >= 60_000) rateBuckets.delete(candidate);
+      }
+    }
+    return;
+  }
+  bucket.count += 1;
+  if (bucket.count > mutationRateLimit) throw new HttpError(429, "Too many requests");
+}
+
+function securityHeaders() {
+  return {
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
+  };
 }
 
 function json(res, payload, status = 200) {
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
+    ...securityHeaders(),
   });
   res.end(JSON.stringify(payload));
 }
@@ -1047,10 +1393,12 @@ function serveStatic(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname === "/" ? "/index.html" : url.pathname;
   const filePath = resolve(distDir, `.${pathname}`);
-  if (!filePath.startsWith(distDir) || !existsSync(filePath)) {
+  const staticRelativePath = relative(distDir, filePath);
+  const outsideDist = staticRelativePath.startsWith("..") || isAbsolute(staticRelativePath);
+  if (outsideDist || !existsSync(filePath) || !statSync(filePath).isFile()) {
     const indexPath = join(distDir, "index.html");
     if (existsSync(indexPath)) {
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", ...securityHeaders() });
       res.end(readFileSync(indexPath));
       return;
     }
@@ -1065,20 +1413,23 @@ function serveStatic(req, res) {
     ".svg": "image/svg+xml",
     ".png": "image/png",
   }[extname(filePath)] || "application/octet-stream";
-  res.writeHead(200, { "content-type": type });
+  res.writeHead(200, { "content-type": type, ...securityHeaders() });
   res.end(readFileSync(filePath));
 }
 
 async function handleApi(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (req.method === "GET" && url.pathname === "/api/health") {
-    return json(res, { ok: true, lastRefreshAt: memory.lastRefreshAt, topics: memory.topics.length });
+    return json(res, { ok: true, lastRefreshAt: memory.lastRefreshAt, topics: memory.topics.length, refreshInFlight });
   }
+  if (!isAuthorized(req)) return json(res, { error: "Unauthorized" }, 401);
+  enforceMutationRateLimit(req);
   if (req.method === "GET" && url.pathname === "/api/topics") {
     return json(res, { topics: filteredTopics(url.search), stats: memory.stats, lastRefreshAt: memory.lastRefreshAt });
   }
   if (req.method === "POST" && url.pathname === "/api/refresh") {
     const next = await runRefresh({ manual: true });
+    if (!next) return json(res, { error: "Refresh already in progress", refreshInFlight: true }, 409);
     return json(res, { ok: true, topics: next.topics, stats: next.stats, jobs: next.jobs });
   }
   if (req.method === "GET" && url.pathname === "/api/radar") {
@@ -1091,20 +1442,24 @@ async function handleApi(req, res) {
     return json(res, { jobs: memory.jobs, refreshInFlight });
   }
   if (req.method === "GET" && url.pathname === "/api/settings") {
-    return json(res, { settings });
+    return json(res, { settings: clientSettings() });
   }
   if (req.method === "POST" && url.pathname === "/api/settings") {
     const body = await readBody(req);
-    settings = {
+    for (const key of ["sources", "sourceConfig", "telegram", "feishu"]) {
+      if (body[key] !== undefined && !isRecord(body[key])) throw new HttpError(400, `${key} must be an object`);
+    }
+    const sourceConfig = body.sourceConfig || {};
+    settings = normalizeSettings({
       ...settings,
       ...body,
       sources: { ...settings.sources, ...(body.sources || {}) },
       sourceConfig: {
         ...settings.sourceConfig,
-        ...(body.sourceConfig || {}),
-        twitter: { ...settings.sourceConfig.twitter, ...(body.sourceConfig?.twitter || {}) },
+        ...sourceConfig,
+        twitter: { ...settings.sourceConfig.twitter, ...(sourceConfig.twitter || {}), ...(sourceConfig.twitter?.bearerToken ? { bearerToken: preserveRedactedSecret(sourceConfig.twitter.bearerToken, settings.sourceConfig.twitter.bearerToken) } : {}) },
         weibo: { ...settings.sourceConfig.weibo, ...(body.sourceConfig?.weibo || {}) },
-        github: { ...settings.sourceConfig.github, ...(body.sourceConfig?.github || {}) },
+        github: { ...settings.sourceConfig.github, ...(sourceConfig.github || {}), ...(sourceConfig.github?.token ? { token: preserveRedactedSecret(sourceConfig.github.token, settings.sourceConfig.github.token) } : {}) },
         reddit: { ...settings.sourceConfig.reddit, ...(body.sourceConfig?.reddit || {}) },
         tiktok: { ...settings.sourceConfig.tiktok, ...(body.sourceConfig?.tiktok || {}) },
         instagram: { ...settings.sourceConfig.instagram, ...(body.sourceConfig?.instagram || {}) },
@@ -1112,24 +1467,35 @@ async function handleApi(req, res) {
         openaiBlog: { ...settings.sourceConfig.openaiBlog, ...(body.sourceConfig?.openaiBlog || {}) },
         deepmind: { ...settings.sourceConfig.deepmind, ...(body.sourceConfig?.deepmind || {}) },
         anthropic: { ...settings.sourceConfig.anthropic, ...(body.sourceConfig?.anthropic || {}) },
-        glassnode: { ...settings.sourceConfig.glassnode, ...(body.sourceConfig?.glassnode || {}) },
-        coinMarketCap: { ...settings.sourceConfig.coinMarketCap, ...(body.sourceConfig?.coinMarketCap || {}) },
+        glassnode: { ...settings.sourceConfig.glassnode, ...(sourceConfig.glassnode || {}), ...(sourceConfig.glassnode?.apiKey ? { apiKey: preserveRedactedSecret(sourceConfig.glassnode.apiKey, settings.sourceConfig.glassnode.apiKey) } : {}) },
+        coinMarketCap: { ...settings.sourceConfig.coinMarketCap, ...(sourceConfig.coinMarketCap || {}), ...(sourceConfig.coinMarketCap?.apiKey ? { apiKey: preserveRedactedSecret(sourceConfig.coinMarketCap.apiKey, settings.sourceConfig.coinMarketCap.apiKey) } : {}) },
         wikipedia: { ...settings.sourceConfig.wikipedia, ...(body.sourceConfig?.wikipedia || {}) },
         youtube: { ...settings.sourceConfig.youtube, ...(body.sourceConfig?.youtube || {}) },
       },
-      telegram: { ...settings.telegram, ...(body.telegram || {}) },
-      feishu: { ...settings.feishu, ...(body.feishu || {}) },
-    };
+      telegram: { ...settings.telegram, ...(body.telegram || {}), ...(body.telegram?.botToken ? { botToken: preserveRedactedSecret(body.telegram.botToken, settings.telegram.botToken) } : {}) },
+      feishu: {
+        ...settings.feishu,
+        ...(body.feishu || {}),
+        ...(body.feishu?.webhookUrl ? { webhookUrl: preserveRedactedSecret(body.feishu.webhookUrl, settings.feishu.webhookUrl) } : {}),
+        ...(body.feishu?.secret ? { secret: preserveRedactedSecret(body.feishu.secret, settings.feishu.secret) } : {}),
+      },
+    });
     persist();
     scheduleAutoRefresh();
-    return json(res, { ok: true, settings });
+    return json(res, { ok: true, settings: clientSettings() });
   }
   if (req.method === "GET" && url.pathname === "/api/assets") {
     return json(res, { assets });
   }
   if (req.method === "POST" && url.pathname === "/api/assets") {
     const body = await readBody(req);
-    const asset = { id: idFor(`${Date.now()}:${body.name}`), type: body.type || "素材", name: body.name || "未命名素材", description: body.description || "", tags: body.tags || [] };
+    const name = boundedString(body.name || "", "name", { min: 1, max: 120 });
+    const type = body.type === undefined ? "素材" : boundedString(body.type, "type", { max: 60 });
+    const description = body.description === undefined ? "" : boundedString(body.description, "description", { max: 2000 });
+    if (body.tags !== undefined && (!Array.isArray(body.tags) || body.tags.length > 20 || body.tags.some((tag) => typeof tag !== "string" || tag.length > 40))) {
+      throw new HttpError(400, "tags must be an array of at most 20 strings");
+    }
+    const asset = { id: idFor(`${Date.now()}:${name}`), type, name, description, tags: body.tags || [] };
     assets.unshift(asset);
     persist();
     return json(res, { ok: true, asset, assets });
@@ -1139,6 +1505,7 @@ async function handleApi(req, res) {
     const topic = memory.topics.find((item) => item.id === body.topicId) || memory.topics[0];
     if (!topic) return json(res, { error: "暂无热点，请先刷新抓取" }, 400);
     const mode = body.mode || "快讯版";
+    if (!copyModes.includes(mode)) throw new HttpError(400, "Unsupported content mode");
     const asset = assets.find((item) => item.id === body.assetId);
     const baseText = topic.publishCopy[mode] || makeCopies(topic).快讯版;
     memory.stats.generated += 1;
@@ -1157,8 +1524,9 @@ async function handleApi(req, res) {
   }
   if (req.method === "POST" && url.pathname === "/api/push/send") {
     const body = await readBody(req);
-    const text = body.text || "";
+    const text = boundedString(body.text || "", "text", { min: 1, max: 4096 });
     const target = body.target || "local";
+    if (!["local", "telegram", "feishu"].includes(target)) throw new HttpError(400, "Unsupported push target");
     const entry = { id: idFor(`${Date.now()}:${target}:${text}`), text, createdAt: nowIso(), status: "simulated", target };
     if (target === "telegram") {
       if (!(settings.telegram.enabled && settings.telegram.botToken && settings.telegram.chatId)) {
@@ -1212,19 +1580,31 @@ async function handleApi(req, res) {
 
 const server = createServer(async (req, res) => {
   try {
-    if (req.url.startsWith("/api/")) return await handleApi(req, res);
+    if (String(req.url || "").startsWith("/api/")) return await handleApi(req, res);
     return serveStatic(req, res);
   } catch (error) {
     console.error(error);
-    return json(res, { error: error.message || "Internal error" }, 500);
+    return json(res, { error: error.message || "Internal error" }, error instanceof HttpError ? error.status : 500);
   }
 });
 
-server.listen(port, async () => {
-  console.log(`AI hot topics API listening on http://localhost:${port}`);
+server.listen(port, host, async () => {
+  console.log(`AI hot topics API listening on http://${host}:${port}`);
   console.log(`Data directory: ${dataDir}`);
+  console.log(`Authentication: ${requireAuth ? "enabled" : "disabled (loopback only)"}`);
   scheduleAutoRefresh();
   if (initialRefresh) {
     runRefresh({ manual: false }).catch((error) => console.error("initial refresh failed", error));
   }
 });
+
+function shutdown(signal) {
+  if (refreshTimer) clearInterval(refreshTimer);
+  server.close(() => {
+    console.log(`Received ${signal}, server stopped`);
+    process.exit(0);
+  });
+}
+
+process.once("SIGINT", () => shutdown("SIGINT"));
+process.once("SIGTERM", () => shutdown("SIGTERM"));

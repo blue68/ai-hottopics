@@ -1,4 +1,5 @@
 const baseUrl = process.env.API_BASE_URL || "http://localhost:8787";
+const headers = process.env.API_TOKEN ? { authorization: `Bearer ${process.env.API_TOKEN}` } : {};
 
 const checks = [
   ["GET", "/api/health"],
@@ -12,7 +13,7 @@ const checks = [
 ];
 
 for (const [method, path] of checks) {
-  const response = await fetch(`${baseUrl}${path}`, { method });
+  const response = await fetch(`${baseUrl}${path}`, { method, headers });
   if (!response.ok) {
     throw new Error(`${method} ${path} failed: ${response.status} ${response.statusText}`);
   }
@@ -25,7 +26,7 @@ for (const [method, path] of checks) {
 
 const contentResponse = await fetch(`${baseUrl}/api/content/generate`, {
   method: "POST",
-  headers: { "content-type": "application/json" },
+  headers: { "content-type": "application/json", ...headers },
   body: JSON.stringify({ mode: "快讯版" }),
 });
 

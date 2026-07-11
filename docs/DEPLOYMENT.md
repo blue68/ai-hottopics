@@ -11,6 +11,32 @@ npm start
 
 Open `http://localhost:8787`.
 
+For an externally reachable single-user deployment, configure a long random token in both `ADMIN_TOKEN` and `VITE_ADMIN_TOKEN`, and bind the service to the public interface only when required:
+
+```bash
+HOST=0.0.0.0
+REQUIRE_AUTH=true
+ADMIN_TOKEN=replace-with-a-long-random-token
+VITE_ADMIN_TOKEN=replace-with-the-same-token
+```
+
+`VITE_ADMIN_TOKEN` is embedded in the browser bundle, so it is not suitable as a multi-user authorization system. For multi-user access, keep the Node service private and put it behind an authenticated reverse proxy.
+
+## Docker
+
+Build and run with a persistent data volume:
+
+```bash
+docker build --build-arg VITE_ADMIN_TOKEN="$ADMIN_TOKEN" -t ai-hottopics .
+docker run --rm -p 127.0.0.1:8787:8787 \
+  -e ADMIN_TOKEN="$ADMIN_TOKEN" \
+  -e REQUIRE_AUTH=true \
+  -v ai-hottopics-data:/app/data \
+  ai-hottopics
+```
+
+The image runs as the non-root `node` user and includes a health check for `/api/health`.
+
 ## Environment Variables
 
 See `.env.example` for all options.
@@ -19,10 +45,14 @@ Minimum useful production values:
 
 ```bash
 PORT=8787
+HOST=127.0.0.1
 DATA_DIR=/var/lib/ai-hottopics
 AUTO_REFRESH=true
 INITIAL_REFRESH=true
 REFRESH_INTERVAL_MINUTES=10
+SOURCE_CONCURRENCY=4
+MAX_BODY_BYTES=1048576
+MUTATION_RATE_LIMIT=30
 ```
 
 Telegram:

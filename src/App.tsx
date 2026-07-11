@@ -1,10 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   BarChart3,
   Bell,
   CheckCircle2,
-  ChevronDown,
   Copy,
   Crosshair,
   Database,
@@ -12,7 +11,6 @@ import {
   Flame,
   Gauge,
   HelpCircle,
-  KeyRound,
   Library,
   LockKeyhole,
   MessageCircle,
@@ -117,7 +115,14 @@ type AnalyticsModel = {
 
 const copyModes = ["快讯版", "锐评版", "Thread版", "Meme版", "带节奏版"];
 const categories = ["全部", "AI", "Crypto", "地缘政治", "猎奇", "整活/Meme", "生活百科"];
-const regions = ["全球", "中国", "美国", "日本", "韩国"];
+const regions = ["全部", "中国", "美国", "日本", "韩国", "全球"];
+const timeWindows = [
+  { key: "15m", label: "15分钟" },
+  { key: "1h", label: "1小时" },
+  { key: "6h", label: "6小时" },
+  { key: "24h", label: "24小时" },
+  { key: "7d", label: "7天" },
+] as const;
 const sourcePlatformLabels: Record<string, string> = {
   twitter: "X",
   weibo: "微博",
@@ -130,7 +135,7 @@ const sourcePlatformLabels: Record<string, string> = {
   tiktok: "TikTok",
   instagram: "Instagram",
   huggingFace: "Hugging Face",
-  openaiBlog: "OpenAI 官方博客",
+  openaiBlog: "OpenAI",
   deepmind: "Google DeepMind",
   anthropic: "Anthropic",
   glassnode: "Glassnode",
@@ -173,14 +178,25 @@ const navItems: Array<{ key: ViewKey; label: string; icon: typeof Gauge; badge?:
 ];
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
+  const token = import.meta.env.VITE_ADMIN_TOKEN;
   const response = await fetch(path, {
     ...options,
     headers: {
       "content-type": "application/json",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
       ...(options?.headers || {}),
     },
   });
-  if (!response.ok) throw new Error((await response.json()).error || response.statusText);
+  if (!response.ok) {
+    const body = await response.text();
+    let message = response.statusText;
+    try {
+      message = JSON.parse(body).error || message;
+    } catch {
+      if (body) message = body.slice(0, 240);
+    }
+    throw new Error(message);
+  }
   return response.json();
 }
 
@@ -201,7 +217,9 @@ async function copyText(value: string) {
 
 function timeAgo(value?: string | null) {
   if (!value) return "从未";
-  const minutes = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 60000));
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) return "未知";
+  const minutes = Math.max(0, Math.round((Date.now() - time) / 60000));
   if (minutes < 1) return "刚刚";
   if (minutes < 60) return `${minutes} 分钟前`;
   if (minutes < 1440) return `${Math.round(minutes / 60)} 小时前`;
@@ -210,6 +228,10 @@ function timeAgo(value?: string | null) {
 
 function riskClass(risk: string) {
   return risk === "高" ? "high" : risk === "中" ? "medium" : "low";
+}
+
+function riskRank(risk: string) {
+  return risk === "高" ? 3 : risk === "中" ? 2 : 1;
 }
 
 function Sparkline({ values, color = "#38bdf8" }: { values: number[]; color?: string }) {
@@ -383,6 +405,8 @@ function FilterBar({
   setCategory,
   region,
   setRegion,
+  timeWindow,
+  setTimeWindow,
   platforms,
 }: {
   platform: string;
@@ -391,6 +415,8 @@ function FilterBar({
   setCategory: (value: string) => void;
   region: string;
   setRegion: (value: string) => void;
+  timeWindow: string;
+  setTimeWindow: (value: string) => void;
   platforms: string[];
 }) {
   return (
@@ -418,9 +444,9 @@ function FilterBar({
       <div className="filter-group">
         <span>时间窗口</span>
         <div className="chip-row">
-          {["15分钟", "1小时", "6小时", "24小时", "7天"].map((item) => (
-            <button className={item === "24小时" ? "active subtle-active" : ""} key={item}>
-              {item}
+          {timeWindows.map((item) => (
+            <button className={timeWindow === item.key ? "active subtle-active" : ""} key={item.key} onClick={() => setTimeWindow(item.key)}>
+              {item.label}
             </button>
           ))}
         </div>
@@ -471,7 +497,9 @@ function TopicTable({ topics, selectedId, setSelectedId }: { topics: Topic[]; se
                 <b>{topic.heat.toFixed(1)}</b>
                 <i style={{ width: `${topic.heat}%` }} />
               </span>
-              <span className="boost">+{topic.boost}%</span>
+              <span className={classNames("boost", topic.boost < 0 && "negative-boost")}>
+                {topic.boost >= 0 ? "+" : ""}{topic.boost}%
+              </span>
               <Sparkline values={topic.trend} color={index % 2 ? "#ff9f43" : "#3bd671"} />
             </button>
           );
@@ -716,6 +744,7 @@ function ContentFactoryPage({
   setPushTarget,
   pushChannels,
   onGenerated,
+  onError,
 }: {
   topics: Topic[];
   selected?: Topic;
@@ -726,10 +755,12 @@ function ContentFactoryPage({
   setPushTarget: (channel: PushChannel) => void;
   pushChannels: PushChannels;
   onGenerated: () => void;
+  onError: (message: string) => void;
 }) {
   const [topicId, setTopicId] = useState(selected?.id || "");
   const [mode, setMode] = useState(copyModes[0]);
   const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
   const topic = topics.find((item) => item.id === topicId) || selected || topics[0];
   const selectedAsset = assets.find((asset) => asset.id === selectedAssetId);
   const draftText = text || topic?.publishCopy[mode] || "";
@@ -740,17 +771,32 @@ function ContentFactoryPage({
 
   async function generate() {
     if (!topic) return;
-    const data = await api<{ text: string }>("/api/content/generate", {
-      method: "POST",
-      body: JSON.stringify({ topicId: topic.id, mode, assetId: selectedAssetId || undefined }),
-    });
-    setText(data.text);
-    onGenerated();
+    setBusy(true);
+    try {
+      const data = await api<{ text: string }>("/api/content/generate", {
+        method: "POST",
+        body: JSON.stringify({ topicId: topic.id, mode, assetId: selectedAssetId || undefined }),
+      });
+      setText(data.text);
+      onGenerated();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "生成失败");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function push() {
-    await api("/api/push/send", { method: "POST", body: JSON.stringify({ text: draftText, target: pushTarget }) });
-    onGenerated();
+    if (!draftText) return;
+    setBusy(true);
+    try {
+      await api("/api/push/send", { method: "POST", body: JSON.stringify({ text: draftText, target: pushTarget }) });
+      onGenerated();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "推送失败");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -760,7 +806,7 @@ function ContentFactoryPage({
           <PenSquare size={18} />
           内容工厂
         </div>
-        <button onClick={generate}>
+        <button onClick={generate} disabled={busy || !topic}>
           <Rocket size={16} /> 生成
         </button>
       </div>
@@ -824,7 +870,7 @@ function ContentFactoryPage({
             <button onClick={() => copyText(draftText)}>
               <Copy size={16} /> 复制
             </button>
-            <button className="publish-button" onClick={push} disabled={!draftText}>
+            <button className="publish-button" onClick={push} disabled={busy || !draftText}>
               <Send size={16} /> 推送至{pushChannelLabels[pushTarget]}
             </button>
           </div>
@@ -843,6 +889,7 @@ function PushCenterPage({
   setPushTarget,
   pushChannels,
   reload,
+  onError,
 }: {
   pushLog: PushLogEntry[];
   settings?: SettingsModel;
@@ -852,11 +899,21 @@ function PushCenterPage({
   setPushTarget: (channel: PushChannel) => void;
   pushChannels: PushChannels;
   reload: () => void;
+  onError: (message: string) => void;
 }) {
   const [text, setText] = useState("热点系统测试推送：本地链路正常。");
+  const [busy, setBusy] = useState(false);
   async function send() {
-    await api("/api/push/send", { method: "POST", body: JSON.stringify({ text, target: pushTarget }) });
-    reload();
+    if (!text.trim()) return;
+    setBusy(true);
+    try {
+      await api("/api/push/send", { method: "POST", body: JSON.stringify({ text, target: pushTarget }) });
+      reload();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "推送失败");
+    } finally {
+      setBusy(false);
+    }
   }
   const updateFeishu = (patch: Partial<SettingsModel["feishu"]>) => {
     if (!settings) return;
@@ -873,7 +930,7 @@ function PushCenterPage({
           <button onClick={() => copyText(text)}>
             <Copy size={16} /> 复制
           </button>
-          <button onClick={send}>
+          <button onClick={send} disabled={busy || !text.trim()}>
             <Send size={16} /> 发送到{pushChannelLabels[pushTarget]}
           </button>
         </div>
@@ -930,19 +987,29 @@ function AssetsPage({
   assets,
   useAsset,
   reload,
+  onError,
 }: {
   assets: Asset[];
   useAsset: (assetId: string) => void;
   reload: () => void;
+  onError: (message: string) => void;
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [busy, setBusy] = useState(false);
   async function addAsset() {
     if (!name.trim()) return;
-    await api("/api/assets", { method: "POST", body: JSON.stringify({ name, description, type: "素材", tags: ["自定义"] }) });
-    setName("");
-    setDescription("");
-    reload();
+    setBusy(true);
+    try {
+      await api("/api/assets", { method: "POST", body: JSON.stringify({ name, description, type: "素材", tags: ["自定义"] }) });
+      setName("");
+      setDescription("");
+      reload();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "新增素材失败");
+    } finally {
+      setBusy(false);
+    }
   }
   return (
     <section className="panel full-panel">
@@ -951,7 +1018,7 @@ function AssetsPage({
           <Library size={18} />
           账号素材库
         </div>
-        <button onClick={addAsset}>新增素材</button>
+        <button onClick={addAsset} disabled={busy || !name.trim()}>新增素材</button>
       </div>
       <div className="asset-editor">
         <input value={name} onChange={(event) => setName(event.target.value)} placeholder="素材名称 / 人设 / 模板" />
@@ -1350,12 +1417,33 @@ function SettingsPage({ settings, setSettings, save }: { settings?: SettingsMode
         <div className="settings-block">
           <strong>阈值与词库</strong>
           <label>
+            自动刷新间隔（分钟）
+            <input
+              type="number"
+              min={1}
+              max={1440}
+              value={settings.refreshIntervalMinutes}
+              onChange={(event) => setSettings({ ...settings, refreshIntervalMinutes: Number(event.target.value) })}
+            />
+          </label>
+          <label>
             热点阈值
             <input
               type="number"
               value={settings.heatThreshold}
               onChange={(event) => setSettings({ ...settings, heatThreshold: Number(event.target.value) })}
             />
+          </label>
+          <label>
+            风险告警阈值
+            <select
+              value={settings.riskThreshold}
+              onChange={(event) => setSettings({ ...settings, riskThreshold: event.target.value })}
+            >
+              <option value="低">低</option>
+              <option value="中">中</option>
+              <option value="高">高</option>
+            </select>
           </label>
           <label>
             追踪关键词
@@ -1412,7 +1500,8 @@ export function App() {
   const [query, setQuery] = useState("");
   const [platform, setPlatform] = useState("全部");
   const [category, setCategory] = useState("全部");
-  const [region, setRegion] = useState("全球");
+  const [region, setRegion] = useState("全部");
+  const [timeWindow, setTimeWindow] = useState("24h");
   const [refreshing, setRefreshing] = useState(false);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [settings, setSettings] = useState<SettingsModel>();
@@ -1425,10 +1514,14 @@ export function App() {
   const [analytics, setAnalytics] = useState<AnalyticsModel>();
   const [error, setError] = useState("");
   const [showHelp, setShowHelp] = useState(false);
+  const loadVersion = useRef(0);
+  const pushTargetInitialized = useRef(false);
+  const settingsDirtyRef = useRef(false);
 
   const loadAll = async () => {
+    const version = ++loadVersion.current;
     try {
-      const params = new URLSearchParams({ platform, category, region, q: query });
+      const params = new URLSearchParams({ platform, category, region, timeWindow, q: query });
       const [topicData, jobData, settingsData, assetsData, pushData, radarData, analyticsData] = await Promise.all([
         api<{ topics: Topic[]; stats: Stats; lastRefreshAt: string | null }>(`/api/topics?${params}`),
         api<{ jobs: Job[] }>("/api/jobs"),
@@ -1438,24 +1531,27 @@ export function App() {
         api<{ keywords: KeywordRow[] }>("/api/radar"),
         api<{ analytics: AnalyticsModel; stats: Stats }>("/api/analytics"),
       ]);
+      if (version !== loadVersion.current) return;
       setTopics(topicData.topics);
       setStats(topicData.stats);
       setLastRefreshAt(topicData.lastRefreshAt);
       setJobs(jobData.jobs);
-      setSettings(settingsData.settings);
+      if (!settingsDirtyRef.current) setSettings(settingsData.settings);
       setAssets(assetsData.assets);
       setPushLog(pushData.pushLog);
       const nextPushChannels = { local: true, telegram: Boolean(pushData.channels?.telegram), feishu: Boolean(pushData.channels?.feishu) };
       setPushChannels(nextPushChannels);
-      if (pushTarget === "local" && (nextPushChannels.feishu || nextPushChannels.telegram)) {
-        setPushTarget(preferredPushTarget(nextPushChannels));
-      }
+      setPushTarget((current) => {
+        if (pushTargetInitialized.current) return current;
+        pushTargetInitialized.current = true;
+        return preferredPushTarget(nextPushChannels);
+      });
       setKeywords(radarData.keywords);
       setAnalytics(analyticsData.analytics);
-      if (!selectedId && topicData.topics[0]) setSelectedId(topicData.topics[0].id);
+      if (topicData.topics[0]) setSelectedId((current) => current || topicData.topics[0].id);
       setError("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "加载失败");
+      if (version === loadVersion.current) setError(err instanceof Error ? err.message : "加载失败");
     }
   };
 
@@ -1463,7 +1559,7 @@ export function App() {
     loadAll();
     const timer = window.setInterval(loadAll, 30000);
     return () => window.clearInterval(timer);
-  }, [platform, category, region, query]);
+  }, [platform, category, region, timeWindow, query]);
 
   async function refresh() {
     setRefreshing(true);
@@ -1479,28 +1575,37 @@ export function App() {
 
   async function saveSettings() {
     if (!settings) return;
-    await api("/api/settings", { method: "POST", body: JSON.stringify(settings) });
-    await loadAll();
+    try {
+      await api("/api/settings", { method: "POST", body: JSON.stringify(settings) });
+      settingsDirtyRef.current = false;
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存设置失败");
+    }
   }
+
+  const updateSettings = (value: SettingsModel) => {
+    settingsDirtyRef.current = true;
+    setSettings(value);
+  };
 
   const selected = useMemo(() => topics.find((topic) => topic.id === selectedId) || topics[0], [topics, selectedId]);
   const platforms = useMemo(() => {
     const names = new Set<string>();
-    const sourceEntries = Object.entries(settings?.sources || {});
-    for (const [key, enabled] of sourceEntries) {
-      if (enabled) names.add(sourcePlatformLabels[key] || key);
-    }
-    if (!sourceEntries.length) {
-      for (const row of analytics?.byPlatform || []) names.add(row.name);
-      for (const topic of topics) names.add(topic.platform);
+    for (const topic of topics) names.add(topic.platform);
+    if (!topics.length) {
+      const sourceEntries = Object.entries(settings?.sources || {});
+      for (const [key, enabled] of sourceEntries) if (enabled) names.add(sourcePlatformLabels[key] || key);
     }
     return [...names].filter(Boolean);
-  }, [settings?.sources, analytics?.byPlatform, topics]);
+  }, [settings?.sources, topics]);
   const notificationCount = useMemo(() => {
     const latestJob = jobs[0];
-    if (!latestJob) return stats.failedSources || 0;
-    return latestJob.sources.filter((source) => source.status === "failed").length;
-  }, [jobs, stats.failedSources]);
+    const failed = latestJob ? latestJob.sources.filter((source) => source.status === "failed").length : stats.failedSources || 0;
+    const threshold = settings?.riskThreshold || "高";
+    const riskAlerts = topics.filter((topic) => riskRank(topic.risk) >= riskRank(threshold)).length;
+    return failed + riskAlerts;
+  }, [jobs, settings?.riskThreshold, stats.failedSources, topics]);
 
   return (
     <div className="app-shell">
@@ -1539,6 +1644,8 @@ export function App() {
             setCategory={setCategory}
             region={region}
             setRegion={setRegion}
+            timeWindow={timeWindow}
+            setTimeWindow={setTimeWindow}
             platforms={platforms}
           />
         )}
@@ -1571,24 +1678,26 @@ export function App() {
             setPushTarget={setPushTarget}
             pushChannels={pushChannels}
             onGenerated={loadAll}
+            onError={setError}
           />
         )}
         {activeView === "push" && (
           <PushCenterPage
             pushLog={pushLog}
             settings={settings}
-            setSettings={setSettings}
+            setSettings={updateSettings}
             saveSettings={saveSettings}
             pushTarget={pushTarget}
             setPushTarget={setPushTarget}
             pushChannels={pushChannels}
             reload={loadAll}
+            onError={setError}
           />
         )}
-        {activeView === "assets" && <AssetsPage assets={assets} useAsset={(assetId) => { setSelectedAssetId(assetId); setActiveView("factory"); }} reload={loadAll} />}
+        {activeView === "assets" && <AssetsPage assets={assets} useAsset={(assetId) => { setSelectedAssetId(assetId); setActiveView("factory"); }} reload={loadAll} onError={setError} />}
         {activeView === "tasks" && <TasksPage jobs={jobs} refresh={refresh} refreshing={refreshing} />}
         {activeView === "analytics" && <AnalyticsPage stats={stats} analytics={analytics} />}
-        {activeView === "settings" && settings && <SettingsPage settings={settings} setSettings={setSettings} save={saveSettings} />}
+        {activeView === "settings" && settings && <SettingsPage settings={settings} setSettings={updateSettings} save={saveSettings} />}
       </main>
     </div>
   );

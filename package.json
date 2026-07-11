@@ -19,10 +19,11 @@
     "vite"
   ],
   "scripts": {
-    "dev": "concurrently \"node --watch server/index.js\" \"vite --host 0.0.0.0\"",
+    "dev": "concurrently \"node --watch server/index.js\" \"vite\"",
     "api": "node --watch server/index.js",
     "check": "tsc -b && node --check server/index.js",
     "build": "tsc -b && vite build",
+    "test": "node --test test/*.test.mjs",
     "smoke": "node scripts/smoke-test.mjs",
     "preview": "node server/index.js",
     "start": "node server/index.js",
@@ -31,6 +32,7 @@
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.4",
     "concurrently": "^9.1.0",
+    "fast-xml-parser": "^5.9.3",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

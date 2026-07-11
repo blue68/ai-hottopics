@@ -25,6 +25,7 @@ React UI -> Vite dev proxy or Node static server -> Node API -> public data sour
 The current implementation avoids a database to keep local setup simple. The persisted files live in `data/` by default:
 
 - `state.json`: topics, jobs, stats, refresh timestamps
+- `state.json`: topics, jobs, stats, refresh timestamps, recent per-topic heat observations
 - `settings.json`: user settings and source switches
 - `assets.json`: persona/template/material library
 - `push-log.json`: simulated or real push history

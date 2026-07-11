@@ -609,6 +609,15 @@ button {
   font-weight: 800;
 }
 
+.negative-boost {
+  color: #4bd68a;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .sparkline {
   width: 86px;
   height: 36px;
@@ -1744,7 +1753,7 @@ select,
 
 @media (max-width: 1420px) {
   body {
-    min-width: 1120px;
+    min-width: 0;
   }
 
   .app-shell {
@@ -1764,6 +1773,25 @@ select,
 
   .topbar {
     grid-template-columns: 1fr 320px auto;
+  }
+}
+
+@media (max-width: 1180px) {
+  .filters {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .filter-group:nth-child(2) {
+    border-right: 0;
+  }
+
+  .topbar {
+    grid-template-columns: 1fr auto;
+  }
+
+  .system-status {
+    grid-column: 1 / -1;
+    grid-row: 2;
   }
 }
 
