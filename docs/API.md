@@ -189,3 +189,42 @@ Supported `target` values:
 - `feishu`
 
 `local` records a simulated push. `telegram` and `feishu` send real messages when their settings are configured.
+
+## X 日榜
+
+`GET /api/twitter/rankings?scope=chinese&date=2026-10-24&mode=demo`
+
+- `scope`: `chinese`、`aicrypto`、`global`，默认 `chinese`。
+- `date`: 北京时间自然日，默认当日；读取历史缓存无需访问 X。
+- `mode`: `demo`（示例）或 `live`（实际缓存），默认 `live`。
+- 返回 `mode`、`scope`、`date`、`timezone`、配置状态、可用历史日期，以及 `accounts`、`topics`、`officialTrends`、采样数量、更新时间、实际查询、截断状态和错误。示例模式不会写入真实缓存。
+
+`POST /api/twitter/rankings/refresh`，请求体：
+
+```json
+{ "scope": "chinese", "date": "2026-10-24" }
+```
+
+手动访问官方 `GET /2/tweets/search/recent` 和当前日期的 `GET /2/trends/by/woeid/:woeid`。认证、写操作限流与其他 API 一致，不由常规刷新任务触发。需要 `twitterRankings.enabled=true`、`sourceConfig.twitter.bearerToken`、该范围查询，以及至少一个榜单开关。无效配置/日期返回 400，并发采集返回 409。上游搜索与地区热榜独立处理，返回 `ok=false` 与 `errors` 表示上游失败，保留各自上次成功快照；不把失败伪装为成功空榜。
+
+设置接口新增 `twitterRankings`：
+
+```json
+{
+  "enabled": false,
+  "accountsEnabled": true,
+  "topicsEnabled": true,
+  "maxPages": 2,
+  "maxResults": 100,
+  "woeid": 1,
+  "queries": {
+    "chinese": "",
+    "aicrypto": "AI OR OpenAI OR Anthropic OR Bitcoin OR Ethereum OR crypto",
+    "global": ""
+  }
+}
+```
+
+`maxPages` 限制为 1–10，`maxResults` 为 10–100；查询受原有 Twitter `queryMaxChars` 限制，中文圈自动附加 `lang:zh`，所有范围排除纯转发。Bearer Token 与原有 Twitter 数据源共用，对客户端继续脱敏。
+
+蓝 V 排名为发文日采样帖子的累计浏览量，不是每日增量。官方地区热榜为当前快照，不按圈层筛选、不提供历史回填；原始帖子量不累加成每日讨论量。

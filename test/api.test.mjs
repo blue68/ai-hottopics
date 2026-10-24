@@ -160,3 +160,37 @@ test("empty content generation returns a useful client error", async () => {
   });
   assert.equal(response.status, 400);
 });
+
+test("X ranking preview, cached data and disabled refresh work without external requests", async () => {
+  const protectedResponse = await request("/api/twitter/rankings?mode=demo", { auth: false });
+  assert.equal(protectedResponse.status, 401);
+  const demo = await request("/api/twitter/rankings?mode=demo&scope=chinese");
+  assert.equal(demo.status, 200);
+  const preview = await demo.json();
+  assert.equal(preview.mode, "demo");
+  assert.equal(preview.accounts.length, 5);
+  assert.equal(preview.timezone, "Asia/Shanghai");
+  const cached = await request("/api/twitter/rankings?mode=live&scope=global");
+  assert.deepEqual((await cached.json()).accounts, []);
+  const disabled = await request("/api/twitter/rankings/refresh", { method: "POST", body: JSON.stringify({ scope: "global" }) });
+  assert.equal(disabled.status, 400);
+  assert.match((await disabled.json()).error, /启用/);
+  assert.equal((await request("/api/twitter/rankings?scope=invalid")).status, 400);
+  assert.equal((await request("/api/twitter/rankings?date=2026-02-30")).status, 400);
+  assert.equal((await request("/api/twitter/rankings?mode=invalid")).status, 400);
+});
+
+test("ranking settings preserve query scopes on partial updates and redact shared credentials", async () => {
+  const save = await request("/api/settings", { method: "POST", body: JSON.stringify({ twitterRankings: { enabled: true, maxPages: 99, queries: { chinese: "科技" } }, sourceConfig: { twitter: { bearerToken: "test-x-secret" } } }) });
+  const first = (await save.json()).settings;
+  assert.equal(first.twitterRankings.maxPages, 10);
+  assert.equal(first.twitterRankings.queries.chinese, "科技");
+  assert.equal(first.sourceConfig.twitter.bearerToken, "********");
+  const update = await request("/api/settings", { method: "POST", body: JSON.stringify({ twitterRankings: { queries: { global: "news" } } }) });
+  const second = (await update.json()).settings;
+  assert.equal(second.twitterRankings.queries.chinese, "科技");
+  assert.equal(second.twitterRankings.queries.global, "news");
+  const future = await request("/api/twitter/rankings/refresh", { method: "POST", body: JSON.stringify({ scope: "global", date: "2099-01-01" }) });
+  assert.equal(future.status, 400);
+  assert.match((await future.json()).error, /尚无可抓取/);
+});

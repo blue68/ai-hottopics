@@ -1418,7 +1418,7 @@ button:disabled {
 
 select,
 .asset-editor input,
-.settings-block input,
+.settings-block input:not([type="checkbox"]),
 .settings-block textarea,
 .source-config-panel input {
   width: 100%;
@@ -1432,7 +1432,7 @@ select,
 
 select,
 .asset-editor input,
-.settings-block input,
+.settings-block input:not([type="checkbox"]),
 .source-config-panel input {
   padding: 0 11px;
 }
@@ -1702,8 +1702,11 @@ select,
 }
 
 .toggle-row input {
-  width: 42px;
-  min-height: auto;
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  padding: 0;
+  margin: 0;
 }
 
 .source-config-block {

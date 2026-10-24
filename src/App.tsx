@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { TwitterRankings, TwitterRankingSettings, type TwitterRankingConfig } from "./TwitterRankings";
 import {
   Activity,
   BarChart3,
@@ -75,6 +76,7 @@ type Job = {
 };
 
 type SettingsModel = {
+  twitterRankings: TwitterRankingConfig;
   refreshIntervalMinutes: number;
   heatThreshold: number;
   riskThreshold: string;
@@ -114,6 +116,7 @@ type AnalyticsModel = {
 };
 
 const copyModes = ["快讯版", "锐评版", "Thread版", "Meme版", "带节奏版"];
+const OverviewCharts = lazy(() => import("./DashboardCharts").then((module) => ({ default: module.OverviewCharts })));
 const categories = ["全部", "AI", "Crypto", "地缘政治", "猎奇", "整活/Meme", "生活百科"];
 const regions = ["全部", "中国", "美国", "日本", "韩国", "全球"];
 const timeWindows = [
@@ -294,7 +297,7 @@ function Sidebar({
         </div>
         <div>
           <strong>热点狙击系统</strong>
-          <span>抓取、分析、生成、推送闭环</span>
+          <span>INTELLIGENCE WORKSPACE</span>
         </div>
       </div>
       <nav className="nav-list">
@@ -310,10 +313,7 @@ function Sidebar({
         })}
       </nav>
       <div className="sidebar-card push-card">
-        <button className="ghost-icon" aria-label="关闭推送提示">
-          <X size={16} />
-        </button>
-        <strong>追踪任务运行中</strong>
+        <strong>数据源状态</strong>
         <span>
           <i />
           {stats.activeSources} 个数据源可用
@@ -650,18 +650,20 @@ function DashboardPage({
   const platformRows = groupTopicCounts(topics, "platform");
 
   return (
-    <div className="main-grid">
+    <>
+      <div className="dashboard-summary">
+        <Metric label="发现热点" value={dashboardStats.discovered} icon={<Flame size={18} />} />
+        <Metric label="高热热点" value={dashboardStats.hot} icon={<Zap size={18} />} />
+        <Metric label="可用数据源" value={stats.activeSources} icon={<Database size={18} />} />
+        <Metric label="失败数据源" value={stats.failedSources} icon={<ShieldAlert size={18} />} />
+      </div>
+      <Suspense fallback={<div className="charts-loading" role="status">图表加载中</div>}><OverviewCharts topics={topics} /></Suspense>
+      <div className="main-grid">
       <TopicTable topics={topics} selectedId={selected?.id} setSelectedId={setSelectedId} />
       <TopicDetail topic={selected} onFactory={() => setActiveView("factory")} />
       <section className="panel trend-panel">
         <div className="panel-title-row">
           <div className="panel-title">趋势概览</div>
-        </div>
-        <div className="metric-grid">
-          <Metric label="发现热点" value={dashboardStats.discovered} icon={<Flame size={20} />} />
-          <Metric label="高热热点" value={dashboardStats.hot} icon={<Zap size={20} />} />
-          <Metric label="可用数据源" value={stats.activeSources} icon={<Database size={20} />} />
-          <Metric label="失败数据源" value={stats.failedSources} icon={<ShieldAlert size={20} />} />
         </div>
         <div className="chart-legend">
           {topics.slice(0, 5).map((topic) => (
@@ -695,9 +697,10 @@ function DashboardPage({
       </section>
       <section className="panel distribution-panel">
         <div className="panel-title">热点分布</div>
-        <MiniBars rows={platformRows.length ? platformRows : analytics?.byPlatform || []} />
+        <MiniBars rows={platformRows} />
       </section>
     </div>
+    </>
   );
 }
 
@@ -1158,7 +1161,7 @@ function SettingsPage({ settings, setSettings, save }: { settings?: SettingsMode
   });
 
   return (
-    <section className="panel full-panel">
+    <section className="panel full-panel settings-page">
       <div className="panel-title-row">
         <div className="panel-title">
           <Settings size={18} />
@@ -1167,7 +1170,7 @@ function SettingsPage({ settings, setSettings, save }: { settings?: SettingsMode
         <button onClick={save}>保存设置</button>
       </div>
       <div className="settings-grid">
-        <div className="settings-block">
+        <div className="settings-block settings-sources">
           <strong>数据源</strong>
           {Object.entries(settings.sources).map(([key, value]) => (
             <label className="toggle-row" key={key}>
@@ -1181,7 +1184,7 @@ function SettingsPage({ settings, setSettings, save }: { settings?: SettingsMode
         </div>
         <div className="settings-block source-config-block">
           <strong>数据源参数</strong>
-          {settings.sources.twitter && (
+          {(settings.sources.twitter || settings.twitterRankings.enabled) && (
             <div className="source-config-panel">
               <b>X / Twitter</b>
               <label>
@@ -1190,7 +1193,7 @@ function SettingsPage({ settings, setSettings, save }: { settings?: SettingsMode
                   type="password"
                   value={settings.sourceConfig.twitter.bearerToken}
                   onChange={(event) => updateSourceConfig("twitter", { bearerToken: event.target.value })}
-                  placeholder="必填，用于 X API v2 Recent Search"
+                  placeholder="用于 X 官方搜索和榜单接口"
                 />
               </label>
               <label>
@@ -1410,10 +1413,11 @@ function SettingsPage({ settings, setSettings, save }: { settings?: SettingsMode
           {settings.sources.youtube && (
             <RssSourceConfig title="YouTube" source="youtube" config={settings.sourceConfig.youtube} updateSourceConfig={updateSourceConfig} />
           )}
-          {!Object.entries(settings.sources).some(([key, enabled]) => enabled && configurableSources.has(key)) && (
+          {!settings.twitterRankings.enabled && !Object.entries(settings.sources).some(([key, enabled]) => enabled && configurableSources.has(key)) && (
             <p className="settings-hint">勾选需要参数的数据源后，这里会出现对应抓取参数。</p>
           )}
         </div>
+        <TwitterRankingSettings config={settings.twitterRankings} onChange={(twitterRankings) => setSettings({ ...settings, twitterRankings })} />
         <div className="settings-block">
           <strong>阈值与词库</strong>
           <label>
@@ -1493,6 +1497,7 @@ function SettingsPage({ settings, setSettings, save }: { settings?: SettingsMode
 
 export function App() {
   const [activeView, setActiveView] = useState<ViewKey>("dashboard");
+  const [dashboardView, setDashboardView] = useState("overview");
   const [topics, setTopics] = useState<Topic[]>([]);
   const [stats, setStats] = useState<Stats>({ discovered: 0, hot: 0, generated: 0, pushed: 0, failedSources: 0, activeSources: 0 });
   const [lastRefreshAt, setLastRefreshAt] = useState<string | null>(null);
@@ -1636,7 +1641,13 @@ export function App() {
             </div>
           </section>
         )}
-        {(activeView === "dashboard" || activeView === "hotlist") && (
+        {activeView === "dashboard" && (
+          <div className="dashboard-tabs" role="tablist" aria-label="Dashboard 视图">
+            <button role="tab" aria-selected={dashboardView === "overview"} onClick={() => setDashboardView("overview")}><Gauge size={16} />综合热点</button>
+            <button role="tab" aria-selected={dashboardView === "twitter"} onClick={() => setDashboardView("twitter")}><TrendingUp size={16} />X 日榜</button>
+          </div>
+        )}
+        {((activeView === "dashboard" && dashboardView === "overview") || activeView === "hotlist") && (
           <FilterBar
             platform={platform}
             setPlatform={setPlatform}
@@ -1649,7 +1660,10 @@ export function App() {
             platforms={platforms}
           />
         )}
-        {activeView === "dashboard" && (
+        {activeView === "dashboard" && dashboardView === "twitter" && (
+          <TwitterRankings api={api} config={settings?.twitterRankings} openSettings={() => setActiveView("settings")} />
+        )}
+        {activeView === "dashboard" && dashboardView === "overview" && (
           <DashboardPage
             topics={topics}
             stats={stats}

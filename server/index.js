@@ -6,6 +6,7 @@ import { isIP } from "node:net";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { XMLParser } from "fast-xml-parser";
+import { beijingDate, collectRankings, dayWindow, defaultRankingConfig, demoRankings, normalizeRankingConfig, rankingQuery, rankingScopes, rankingView } from "./twitter-rankings.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const rootDir = resolve(__dirname, "..");
@@ -37,6 +38,7 @@ const statePath = join(dataDir, "state.json");
 const settingsPath = join(dataDir, "settings.json");
 const assetsPath = join(dataDir, "assets.json");
 const pushPath = join(dataDir, "push-log.json");
+const rankingsPath = join(dataDir, "twitter-rankings.json");
 
 const defaultSettings = {
   refreshIntervalMinutes: Number(process.env.REFRESH_INTERVAL_MINUTES || 10),
@@ -124,6 +126,7 @@ const defaultSettings = {
       sourceName: process.env.YOUTUBE_SOURCE_NAME || "YouTube RSS",
     },
   },
+  twitterRankings: defaultRankingConfig,
   keywords: csv(process.env.TRACK_KEYWORDS, ["AI", "OpenAI", "Bitcoin", "crypto", "芯片", "电动车", "地缘政治", "robot", "agent"]),
   blockedWords: csv(process.env.BLOCKED_WORDS, ["广告", "招聘", "水贴", "博彩", "返利"]),
   telegram: {
@@ -184,6 +187,9 @@ let assets = normalizeAssets(loadJson(assetsPath, defaultAssets));
 let pushLog = normalizePushLog(loadJson(pushPath, []));
 let refreshInFlight = false;
 let refreshTimer = null;
+let rankingStore = loadJson(rankingsPath, { days: {} });
+if (!rankingStore || typeof rankingStore.days !== "object" || !rankingStore.days) rankingStore = { days: {} };
+let rankingsInFlight = false;
 const rateBuckets = new Map();
 
 class HttpError extends Error {
@@ -332,6 +338,7 @@ function normalizeSettings(input = {}) {
     riskThreshold: ["低", "中", "高"].includes(next.riskThreshold) ? next.riskThreshold : defaultSettings.riskThreshold,
     keywords: stringList(next.keywords, defaultSettings.keywords),
     blockedWords: stringList(next.blockedWords, defaultSettings.blockedWords),
+    twitterRankings: normalizeRankingConfig(next.twitterRankings),
     sourceConfig: {
       ...next.sourceConfig,
       twitter: {
@@ -1424,6 +1431,48 @@ async function handleApi(req, res) {
   }
   if (!isAuthorized(req)) return json(res, { error: "Unauthorized" }, 401);
   enforceMutationRateLimit(req);
+  if (["/api/twitter/rankings", "/api/twitter/rankings/refresh"].includes(url.pathname)) {
+    const body = req.method === "POST" ? await readBody(req) : {};
+    const scope = body.scope ?? url.searchParams.get("scope") ?? "chinese";
+    const date = body.date ?? url.searchParams.get("date") ?? beijingDate();
+    if (!rankingScopes.includes(scope)) throw new HttpError(400, "未知的 X 榜单范围");
+    try { dayWindow(date); } catch (error) { throw new HttpError(400, error.message); }
+    const config = settings.twitterRankings;
+    const token = settings.sourceConfig.twitter.bearerToken;
+    const previous = rankingStore.days[date]?.[scope];
+    const meta = {
+      scope, date, timezone: "Asia/Shanghai", inFlight: rankingsInFlight,
+      enabled: config.enabled, accountsEnabled: config.accountsEnabled, topicsEnabled: config.topicsEnabled,
+      configured: Boolean(token), queryConfigured: Boolean(config.queries[scope]),
+      availableDates: Object.keys(rankingStore.days).filter((day) => rankingStore.days[day]?.[scope]).sort().reverse(),
+    };
+    if (req.method === "GET" && url.pathname === "/api/twitter/rankings") {
+      const mode = url.searchParams.get("mode") || "live";
+      if (!["demo", "live"].includes(mode)) throw new HttpError(400, "未知的数据模式");
+      return json(res, { ...meta, mode, ...(mode === "demo" ? demoRankings(scope, date) : rankingView(previous)) });
+    }
+    if (req.method === "POST" && url.pathname === "/api/twitter/rankings/refresh") {
+      if (!config.enabled) throw new HttpError(400, "请先在设置中心启用 X 榜单接口");
+      if (!token) throw new HttpError(400, "请先配置 X API Bearer Token");
+      if (!config.accountsEnabled && !config.topicsEnabled) throw new HttpError(400, "请至少启用一个榜单");
+      if (rankingsInFlight) throw new HttpError(409, "X 榜单抓取正在进行中");
+      try { rankingQuery(config, scope, settings.sourceConfig.twitter.queryMaxChars); } catch (error) { throw new HttpError(400, error.message); }
+      rankingsInFlight = true;
+      try {
+        const result = await collectRankings({ config, scope, date, token, queryMaxChars: settings.sourceConfig.twitter.queryMaxChars, previous, request: fetchJson });
+        rankingStore.days[date] = { ...rankingStore.days[date], [scope]: result.bucket };
+        const cutoff = beijingDate(new Date(Date.now() - 30 * 86400_000));
+        rankingStore.days = Object.fromEntries(Object.entries(rankingStore.days).filter(([day]) => day >= cutoff));
+        writeJsonAtomic(rankingsPath, rankingStore);
+        return json(res, { ...meta, inFlight: false, mode: "live", ok: result.ok, ...rankingView(result.bucket) });
+      } catch (error) {
+        throw new HttpError(400, safeError(error));
+      } finally {
+        rankingsInFlight = false;
+      }
+    }
+    return json(res, { error: "Method not allowed" }, 405);
+  }
   if (req.method === "GET" && url.pathname === "/api/topics") {
     return json(res, { topics: filteredTopics(url.search), stats: memory.stats, lastRefreshAt: memory.lastRefreshAt });
   }
@@ -1446,13 +1495,14 @@ async function handleApi(req, res) {
   }
   if (req.method === "POST" && url.pathname === "/api/settings") {
     const body = await readBody(req);
-    for (const key of ["sources", "sourceConfig", "telegram", "feishu"]) {
+    for (const key of ["sources", "sourceConfig", "telegram", "feishu", "twitterRankings"]) {
       if (body[key] !== undefined && !isRecord(body[key])) throw new HttpError(400, `${key} must be an object`);
     }
     const sourceConfig = body.sourceConfig || {};
     settings = normalizeSettings({
       ...settings,
       ...body,
+      twitterRankings: { ...settings.twitterRankings, ...(body.twitterRankings || {}), queries: { ...settings.twitterRankings.queries, ...(body.twitterRankings?.queries || {}) } },
       sources: { ...settings.sources, ...(body.sources || {}) },
       sourceConfig: {
         ...settings.sourceConfig,
